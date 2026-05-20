@@ -246,13 +246,17 @@ while IFS= read -r var; do
     [ -n "$var" ] && docker_args+=(-e "$var")
 done < <(env | awk -F= '/^ANTHROPIC_/ {print $1}')
 
-# Forward Superset-injected workspace env vars so the agent knows which
-# workspace it's in. Pass by name; docker reads the value from our env.
-for var in SUPERSET_WORKSPACE_NAME SUPERSET_ROOT_PATH; do
-    if [ -n "${!var:-}" ]; then
-        docker_args+=(-e "$var")
-    fi
-done
+# Forward all Superset-injected env vars (workspace identity, home dir, etc.)
+# so hooks like notify.sh can locate Superset's IPC socket/scripts.
+while IFS= read -r var; do
+    [ -n "$var" ] && docker_args+=(-e "$var")
+done < <(env | awk -F= '/^SUPERSET_/ {print $1}')
+
+# Mount SUPERSET_HOME_DIR at the same path so notify.sh and any IPC sockets
+# it references resolve correctly inside the container.
+if [ -n "${SUPERSET_HOME_DIR:-}" ] && [ -d "$SUPERSET_HOME_DIR" ]; then
+    docker_args+=(-v "$SUPERSET_HOME_DIR:$SUPERSET_HOME_DIR")
+fi
 
 # --- go ---------------------------------------------------------------------
 # Start the detached keepalive container (no-op if it somehow already exists).
