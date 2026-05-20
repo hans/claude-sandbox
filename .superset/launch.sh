@@ -60,22 +60,34 @@ fi
 
 # macOS: Claude Code stores OAuth tokens in the system keychain, not in any
 # file. The Linux container can't read the keychain, so we extract the JSON
-# blob and stage it at ~/.claude/.credentials.json (where Claude Code on
-# Linux looks for it -- that path is inside the mounted ~/.claude directory).
+# blob and stage it at ~/.claude/.credentials.json (inside the mounted
+# ~/.claude directory) so Linux Claude finds it natively.
 #
-# After the container exits we sync .credentials.json back to the keychain so
-# the next session (and native `claude` on the host) sees the refreshed token.
+# A trap syncs that file back to the keychain on every exit -- including
+# Ctrl-C, set -e bailouts, and reattach exits -- so any in-container token
+# refresh propagates to the keychain (and from there to host-native claude
+# and to future container launches in other worktrees).
+#
+# The extract itself runs lazily, only when we're starting a fresh container
+# (see below). On reattach the bind-mounted file is authoritative: a
+# still-running container has likely refreshed the token in-place, and
+# re-extracting from the (now-stale) keychain would clobber that.
 MACOS_CREDS=""
+sync_credentials_back() {
+    [ -z "$MACOS_CREDS" ] && return 0
+    [ -f "$MACOS_CREDS" ] || return 0
+    local refreshed
+    refreshed="$(cat "$MACOS_CREDS" 2>/dev/null)" || return 0
+    [ -z "$refreshed" ] && return 0
+    if security add-generic-password -s 'Claude Code-credentials' -a "$USER" -w "$refreshed" -U 2>/dev/null; then
+        echo "claude-sandbox: synced refreshed credentials back to keychain." >&2
+    else
+        echo "claude-sandbox: warning -- couldn't update keychain after session (will need to log in next time)." >&2
+    fi
+}
 if [ "$(uname -s)" = "Darwin" ]; then
     MACOS_CREDS="$HOME/.claude/.credentials.json"
-    if blob="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)"; then
-        umask 077
-        printf '%s\n' "$blob" > "$MACOS_CREDS"
-    else
-        echo "claude-sandbox: warning -- couldn't read 'Claude Code-credentials' from keychain." >&2
-        echo "  Run \`claude /login\` on the host (so the keychain entry exists)." >&2
-        echo "  Continuing; the container may prompt you to log in instead." >&2
-    fi
+    trap sync_credentials_back EXIT
 fi
 
 # --- container name ---------------------------------------------------------
@@ -108,8 +120,26 @@ fi
 # --- reattach if container already exists -----------------------------------
 # Invoke entrypoint.sh explicitly so /workdir/.env is re-sourced in the exec
 # path too (docker exec otherwise bypasses ENTRYPOINT).
+#
+# We deliberately don't `exec` here: launch.sh has to outlive the docker exec
+# so the EXIT trap fires and syncs any in-container token refresh back to
+# the keychain. `exec`-ing would replace this script and skip the trap.
 if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
-    exec docker exec -it "$NAME" /usr/local/bin/entrypoint.sh "${claude_argv[@]}"
+    docker exec -it "$NAME" /usr/local/bin/entrypoint.sh "${claude_argv[@]}"
+    exit $?
+fi
+
+# Fresh container: stage the keychain blob now so Linux Claude can read it.
+# (Skipped on the reattach path above -- see the comment block above MACOS_CREDS.)
+if [ -n "$MACOS_CREDS" ]; then
+    if blob="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)"; then
+        umask 077
+        printf '%s\n' "$blob" > "$MACOS_CREDS"
+    else
+        echo "claude-sandbox: warning -- couldn't read 'Claude Code-credentials' from keychain." >&2
+        echo "  Run \`claude /login\` on the host (so the keychain entry exists)." >&2
+        echo "  Continuing; the container may prompt you to log in instead." >&2
+    fi
 fi
 
 # --- run flags --------------------------------------------------------------
@@ -264,18 +294,6 @@ docker "${docker_args[@]}" "$IMAGE" sleep infinity >/dev/null
 
 # Attach an interactive claude session. Closing this terminal only drops the
 # exec -- the container (and any other exec'd agents) keep running.
+# Sync-back to the macOS keychain runs from the EXIT trap installed above.
 # To stop the sandbox when finished: docker stop "$NAME"
 docker exec -it "$NAME" /usr/local/bin/entrypoint.sh "${claude_argv[@]}"
-exit_code=$?
-
-# macOS: sync the (possibly refreshed) credentials file back to the keychain
-# so the next session doesn't overwrite it with a stale entry.
-if [ -n "$MACOS_CREDS" ] && [ -f "$MACOS_CREDS" ]; then
-    if refreshed="$(cat "$MACOS_CREDS" 2>/dev/null)" && [ -n "$refreshed" ]; then
-        security add-generic-password -s 'Claude Code-credentials' -a "$USER" -w "$refreshed" -U 2>/dev/null \
-            && echo "claude-sandbox: synced refreshed credentials back to keychain." >&2 \
-            || echo "claude-sandbox: warning -- couldn't update keychain after session (will need to log in next time)." >&2
-    fi
-fi
-
-exit $exit_code
