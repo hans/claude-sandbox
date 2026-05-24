@@ -18,8 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config \
         less vim-tiny \
         ripgrep jq fd-find \
+        sudo \
         python3 python3-pip python3-venv \
     && ln -s "$(command -v fdfind)" /usr/local/bin/fd \
+    && echo 'ALL ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers \
     && rm -rf /var/lib/apt/lists/*
 
 # --- uv (Python package/env manager) ----------------------------------------
