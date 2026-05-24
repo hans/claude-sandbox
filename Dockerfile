@@ -44,14 +44,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # --- non-root user ----------------------------------------------------------
 # We create a `claude` user at UID 1000 as the nominal owner of /home/claude,
 # but at runtime launch.sh passes `-u $(id -u):$(id -g)` so the container runs
-# as the host user. To make that work, /home/claude must be writable by any
-# UID -- hence the 0777 mode below. Bind-mounted subdirs (.claude, .gitconfig,
-# .ssh) carry host UIDs and permissions, which is what we want.
+# as the host user (often a different UID). entrypoint.sh registers that UID
+# in /etc/passwd at startup so sudo and whoami work -- /etc/passwd is 666 to
+# allow this without root. /home/claude is 777 so any UID can write there.
 # ubuntu:24.04 ships a stock `ubuntu` user at UID 1000; remove it so we can
 # claim that UID for `claude`.
 RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd --create-home --uid 1000 --shell /bin/bash claude \
-    && chmod 0777 /home/claude
+    && chmod 0777 /home/claude \
+    && chmod 666 /etc/passwd /etc/group
 
 # Trust the bind-mounted worktree even when its UID doesn't match the
 # runtime UID (git refuses by default since CVE-2022-24765).
