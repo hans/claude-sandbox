@@ -158,6 +158,8 @@ docker_args=(
     -e HOME=/home/claude                          # ensure $HOME points at the user dir even
                                                   # when the runtime UID has no /etc/passwd entry
     -e UV_PROJECT_ENVIRONMENT=/workdir/.venv-container  # separate venv from host's .venv
+    -e UV_CACHE_DIR=/home/claude/.cache/uv
+    -v "$HOME/.cache/uv:/home/claude/.cache/uv"         # shared uv cache across all sandbox containers
     -u "$(id -u):$(id -g)"                        # match host UID/GID so bind-mount writes work
     --network "$NETWORK"
 )
