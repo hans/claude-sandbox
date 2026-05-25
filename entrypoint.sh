@@ -8,6 +8,8 @@ set -eu
 
 if ! getent passwd "$(id -u)" >/dev/null 2>&1; then
     echo "host:x:$(id -u):$(id -g):host user:/home/claude:/bin/bash" >> /etc/passwd
+    # Add shadow entry with * (no password, not locked) so sudo's account check passes
+    echo "host:*:$(( $(date +%s) / 86400 )):0:99999:7:::" >> /etc/shadow
 fi
 if ! getent group "$(id -g)" >/dev/null 2>&1; then
     echo "host:x:$(id -g):" >> /etc/group

@@ -53,7 +53,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd --create-home --uid 1000 --shell /bin/bash claude \
     && chmod 0777 /home/claude \
-    && chmod 666 /etc/passwd /etc/group
+    && chmod 666 /etc/passwd /etc/group /etc/shadow
 
 # Trust the bind-mounted worktree even when its UID doesn't match the
 # runtime UID (git refuses by default since CVE-2022-24765).
