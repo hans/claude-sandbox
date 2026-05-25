@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
     && ln -s "$(command -v fdfind)" /usr/local/bin/fd \
     && echo 'ALL ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers \
-    && sed -i '/@include common-account/d' /etc/pam.d/sudo \
+    && sed -i 's|@include common-account|account sufficient pam_permit.so|' /etc/pam.d/sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # --- uv (Python package/env manager) ----------------------------------------
