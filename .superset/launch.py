@@ -367,10 +367,22 @@ def build_docker_args(
         if key.startswith("ANTHROPIC_"):
             args += ["-e", key]
 
-    # Forward SUPERSET_* env vars
+    # Make the host reachable as host.docker.internal from inside the container.
+    # Docker Desktop (macOS/Windows) provides this automatically; on Linux we
+    # need the explicit --add-host mapping.  Bridge-networked containers resolve
+    # "localhost" to their own loopback, so Superset notification endpoints that
+    # use localhost/127.0.0.1 would silently fail without this.
+    args += ["--add-host", "host.docker.internal:host-gateway"]
+
+    # Forward SUPERSET_* env vars, rewriting localhost/127.0.0.1 references to
+    # host.docker.internal so that notification callbacks (e.g. PushNotification)
+    # reach the host process rather than the container's own loopback.
+    _localhost_re = re.compile(r'\b(localhost|127\.0\.0\.1)\b')
     for key in sorted(os.environ):
         if key.startswith("SUPERSET_"):
-            args += ["-e", key]
+            value = os.environ[key]
+            rewritten = _localhost_re.sub("host.docker.internal", value)
+            args += ["-e", f"{key}={rewritten}"]
 
     # Mount SUPERSET_HOME_DIR if set and exists
     superset_home = os.environ.get("SUPERSET_HOME_DIR", "")

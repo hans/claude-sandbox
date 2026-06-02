@@ -357,7 +357,7 @@ class TestSupersetHomeDir:
     """
 
     def test_superset_home_dir_forwarded_and_mounted(self, tmp_home, tmp_worktree, monkeypatch):
-        """SUPERSET_HOME_DIR env var must appear in -e args and the dir bind-mounted."""
+        """SUPERSET_HOME_DIR env var must appear in -e KEY=VALUE args and the dir bind-mounted."""
         superset_home = tmp_worktree.parent / "superset_home"
         superset_home.mkdir()
         monkeypatch.setenv("SUPERSET_HOME_DIR", str(superset_home))
@@ -369,16 +369,115 @@ class TestSupersetHomeDir:
             network="bridge",
             claude_json_tmp="/tmp/fake-claude-json",
         )
-        # Check env forwarded
+        # SUPERSET_* vars are forwarded as KEY=VALUE so docker gets the exact value.
         env_args = _extract_env_args(args)
-        assert "SUPERSET_HOME_DIR" in env_args, (
-            f"SUPERSET_HOME_DIR should be forwarded as -e. env args: {env_args}"
+        assert any(e.startswith("SUPERSET_HOME_DIR=") for e in env_args), (
+            f"SUPERSET_HOME_DIR should be forwarded as -e KEY=VALUE. env args: {env_args}"
         )
         # Check bind mount present
         mounts = _extract_volume_mounts(args)
         superset_mounts = [m for m in mounts if str(superset_home) in m]
         assert superset_mounts, (
             f"SUPERSET_HOME_DIR dir should be bind-mounted. mounts: {mounts}"
+        )
+
+
+# ===========================================================================
+# 8b. host.docker.internal mapping + localhost rewriting in SUPERSET_* vars
+# ===========================================================================
+
+class TestSupersetNotificationReachability:
+    """host.docker.internal must be reachable and localhost URLs rewritten.
+
+    Before fix: the PushNotification tool called back to a Superset endpoint
+    that Superset injected via SUPERSET_* env vars.  Those URLs often contained
+    'localhost' or '127.0.0.1'.  Inside a bridge-networked container those
+    addresses resolve to the container's own loopback, not the host, so
+    notifications were silently dropped.
+    """
+
+    def test_host_docker_internal_add_host_present(self, tmp_home, tmp_worktree, monkeypatch):
+        """--add-host host.docker.internal:host-gateway must appear in docker run args."""
+        args = launch.build_docker_args(
+            name="test-container",
+            pwd=str(tmp_worktree),
+            image="claude-sandbox:latest",
+            network="bridge",
+            claude_json_tmp="/tmp/fake-claude-json",
+        )
+        it = iter(args)
+        add_host_values = []
+        for token in it:
+            if token == "--add-host":
+                try:
+                    add_host_values.append(next(it))
+                except StopIteration:
+                    pass
+        assert "host.docker.internal:host-gateway" in add_host_values, (
+            f"--add-host host.docker.internal:host-gateway missing. add-host args: {add_host_values}"
+        )
+
+    def test_localhost_in_superset_var_rewritten(self, tmp_home, tmp_worktree, monkeypatch):
+        """SUPERSET_* vars with 'localhost' must be rewritten to 'host.docker.internal'."""
+        monkeypatch.setenv("SUPERSET_NOTIFICATION_URL", "http://localhost:9999/notify")
+
+        args = launch.build_docker_args(
+            name="test-container",
+            pwd=str(tmp_worktree),
+            image="claude-sandbox:latest",
+            network="bridge",
+            claude_json_tmp="/tmp/fake-claude-json",
+        )
+        env_args = _extract_env_args(args)
+        notification_entries = [e for e in env_args if e.startswith("SUPERSET_NOTIFICATION_URL=")]
+        assert notification_entries, "SUPERSET_NOTIFICATION_URL should be forwarded"
+        value = notification_entries[0].split("=", 1)[1]
+        assert "localhost" not in value, (
+            f"'localhost' should be rewritten in SUPERSET_* vars, got: {value!r}"
+        )
+        assert "host.docker.internal" in value, (
+            f"'host.docker.internal' should replace 'localhost', got: {value!r}"
+        )
+
+    def test_127_0_0_1_in_superset_var_rewritten(self, tmp_home, tmp_worktree, monkeypatch):
+        """SUPERSET_* vars with '127.0.0.1' must be rewritten to 'host.docker.internal'."""
+        monkeypatch.setenv("SUPERSET_SOCKET_ADDR", "http://127.0.0.1:8080/cb")
+
+        args = launch.build_docker_args(
+            name="test-container",
+            pwd=str(tmp_worktree),
+            image="claude-sandbox:latest",
+            network="bridge",
+            claude_json_tmp="/tmp/fake-claude-json",
+        )
+        env_args = _extract_env_args(args)
+        entries = [e for e in env_args if e.startswith("SUPERSET_SOCKET_ADDR=")]
+        assert entries, "SUPERSET_SOCKET_ADDR should be forwarded"
+        value = entries[0].split("=", 1)[1]
+        assert "127.0.0.1" not in value, (
+            f"'127.0.0.1' should be rewritten in SUPERSET_* vars, got: {value!r}"
+        )
+        assert "host.docker.internal" in value, (
+            f"'host.docker.internal' should replace '127.0.0.1', got: {value!r}"
+        )
+
+    def test_non_localhost_superset_var_unchanged(self, tmp_home, tmp_worktree, monkeypatch):
+        """SUPERSET_* vars without localhost addresses must pass through unchanged."""
+        monkeypatch.setenv("SUPERSET_HOME_DIR", "/home/user/.superset")
+        monkeypatch.setenv("SUPERSET_AGENT_ID", "agent-42")
+
+        args = launch.build_docker_args(
+            name="test-container",
+            pwd=str(tmp_worktree),
+            image="claude-sandbox:latest",
+            network="bridge",
+            claude_json_tmp="/tmp/fake-claude-json",
+        )
+        env_args = _extract_env_args(args)
+        agent_entries = [e for e in env_args if e.startswith("SUPERSET_AGENT_ID=")]
+        assert agent_entries, "SUPERSET_AGENT_ID should be forwarded"
+        assert agent_entries[0] == "SUPERSET_AGENT_ID=agent-42", (
+            f"Non-localhost value should be unchanged, got: {agent_entries[0]!r}"
         )
 
 
