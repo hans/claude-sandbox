@@ -106,6 +106,16 @@ hash_path() {
 WORKTREE_BASENAME="$(basename "$PWD" | tr -c 'A-Za-z0-9_.-' '-' | tr -s '-' | sed 's/-*$//')"
 NAME="claude-sandbox-${WORKTREE_BASENAME}-$(hash_path "$PWD")"
 
+# Give each container its own copy of .claude.json to prevent concurrent-write
+# corruption when multiple sandboxes run in parallel. The file holds only UI
+# state (release notes seen, caches, watermarks) -- credentials live in
+# .claude/.credentials.json which is covered by the shared .claude/ bind mount.
+CLAUDE_JSON_TMP="$(mktemp "/tmp/claude-json-${NAME}-XXXXXX")"
+cp "$HOME/.claude.json" "$CLAUDE_JSON_TMP"
+chmod 600 "$CLAUDE_JSON_TMP"
+_cleanup_claude_json() { rm -f "$CLAUDE_JSON_TMP"; }
+trap '_cleanup_claude_json; sync_credentials_back' EXIT
+
 # --- build claude argv ------------------------------------------------------
 # Claude Code accepts an initial prompt as a positional argument.
 # When no prompt is given, omit it so claude starts in plain interactive mode.
@@ -152,7 +162,7 @@ docker_args=(
     --name "$NAME"
     -v "$PWD:/workdir"
     -v "$HOME/.claude:/home/claude/.claude"      # rw -- claude writes session state here
-    -v "$HOME/.claude.json:/home/claude/.claude.json"  # the actual config file (lives next to .claude/, not inside)
+    -v "$CLAUDE_JSON_TMP:/home/claude/.claude.json"   # per-container copy -- avoids concurrent-write corruption
     -v "$HOME/.gitconfig:/home/claude/.gitconfig:ro"
     -w /workdir
     -e HOME=/home/claude                          # ensure $HOME points at the user dir even
