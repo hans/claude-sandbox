@@ -9,7 +9,8 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PATH="/home/claude/.local/bin:$PATH"
+    PATH="/home/claude/.local/bin:$PATH" \
+    DISABLE_AUTOUPDATER=1
 
 # --- core toolchain ---------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
