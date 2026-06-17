@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, field
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,78 @@ def detect_prompt(argv_tail: list[str]) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read()
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Project (workload) configuration
+# ---------------------------------------------------------------------------
+# Per-project tooling assumptions (which venv dir, which caches to share, which
+# subtrees to skip in the symlink scan) live in an optional .claude-sandbox.toml
+# at the worktree root -- NOT baked into the sandbox core. Absent the file, the
+# sandbox makes no language/toolchain assumptions. This repo ships a toml with
+# the Python/uv defaults; a Rust or Go checkout drops in its own (or none).
+
+
+@dataclass
+class ProjectConfig:
+    # Extra env vars to set inside the container (KEY=VALUE).
+    env: dict = field(default_factory=dict)
+    # Extra bind mounts as (host_path, container_path, mode) triples.
+    mounts: list = field(default_factory=list)
+    # Extra directory names to prune from the symlink-escape scan.
+    extra_prune: set = field(default_factory=set)
+
+
+def load_project_config(pwd: str) -> ProjectConfig:
+    """Load .claude-sandbox.toml from *pwd*; return an empty config if absent.
+
+    If the file exists but can't be parsed (or no TOML parser is available on
+    this Python), fail loud rather than silently ignoring it -- a present
+    config that says "don't use uv" must never be silently overridden by a
+    default that does.
+    """
+    path = pathlib.Path(pwd) / ".claude-sandbox.toml"
+    if not path.is_file():
+        return ProjectConfig()
+
+    try:
+        import tomllib  # Python 3.11+
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ModuleNotFoundError:
+            print(
+                f"claude-sandbox: found {path} but no TOML parser is available.",
+                file=sys.stderr,
+            )
+            print(
+                "  Run launch.py with Python 3.11+ or `pip install tomli`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except Exception as exc:  # noqa: BLE001 -- surface any parse error loudly
+        print(f"claude-sandbox: failed to parse {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    home = str(pathlib.Path.home())
+
+    def _expand(p: str) -> str:
+        return os.path.expanduser(os.path.expandvars(p)) if p else p
+
+    env = {str(k): str(v) for k, v in (data.get("env") or {}).items()}
+    mounts = []
+    for m in data.get("mounts") or []:
+        host = _expand(str(m.get("host", "")))
+        container = str(m.get("container", "")) or host
+        mode = str(m.get("mode", "rw"))
+        if host:
+            mounts.append((host, container, mode))
+    extra_prune = {str(n) for n in (data.get("prune") or [])}
+    return ProjectConfig(env=env, mounts=mounts, extra_prune=extra_prune)
 
 
 # ---------------------------------------------------------------------------
@@ -244,15 +317,18 @@ def _symlink_mount_mode(target: str, pwd: str) -> str:
     return "ro"
 
 
-def collect_symlink_mounts(pwd: str) -> list[tuple[str, str]]:
+def collect_symlink_mounts(pwd: str, extra_prune=None) -> list[tuple[str, str]]:
     """Return deduplicated (target, mode) pairs for external symlinks in *pwd*.
 
-    Skips: .git, .venv, .venv-container, venv, node_modules subtrees.
+    Skips: .git plus common virtualenv/dep subtrees (.venv, .venv-container,
+    venv, node_modules) and any names in *extra_prune* (from project config).
     Skips: targets inside the worktree.
     Skips: targets that don't exist on disk.
     Deduplication: if the same target appears with rw and ro, prefer rw.
     """
     _PRUNE_NAMES = {".git", ".venv", ".venv-container", "venv", "node_modules"}
+    if extra_prune:
+        _PRUNE_NAMES = _PRUNE_NAMES | set(extra_prune)
     pwd_real = _resolve_path(pwd)
 
     # Gather {target -> mode}; when both rw and ro appear, keep rw.
@@ -308,12 +384,17 @@ def build_docker_args(
     image: str,
     network: str,
     claude_json_tmp: str,
+    project_config: "ProjectConfig | None" = None,
 ) -> list[str]:
     """Return the full argument list for `docker run` (excluding the image/cmd).
 
     This is a pure function (aside from reading env vars and the filesystem)
-    so it can be unit-tested without invoking Docker.
+    so it can be unit-tested without invoking Docker. *project_config* defaults
+    to auto-detection from the worktree's .claude-sandbox.toml.
     """
+    if project_config is None:
+        project_config = load_project_config(pwd)
+
     home = str(pathlib.Path.home())
     uid_gid = f"{os.getuid()}:{os.getgid()}"
 
@@ -326,12 +407,15 @@ def build_docker_args(
         "-v", f"{home}/.gitconfig:/home/claude/.gitconfig:ro",
         "-w", "/workdir",
         "-e", "HOME=/home/claude",
-        "-e", "UV_PROJECT_ENVIRONMENT=/workdir/.venv-container",
-        "-e", "UV_CACHE_DIR=/home/claude/.cache/uv",
-        "-v", f"{home}/.cache/uv:/home/claude/.cache/uv",
         "-u", uid_gid,
         "--network", network,
     ]
+
+    # Project (workload) env vars and mounts from .claude-sandbox.toml.
+    for key in sorted(project_config.env):
+        args += ["-e", f"{key}={project_config.env[key]}"]
+    for host_path, container_path, mode in project_config.mounts:
+        args += ["-v", f"{host_path}:{container_path}:{mode}"]
 
     # Port 8888 mapping
     args += ["-p", "8888"]
@@ -357,7 +441,7 @@ def build_docker_args(
 
     # Symlink mounts
     if os.environ.get("CLAUDE_SANDBOX_MOUNT_SYMLINKS", "1") == "1":
-        mounts = collect_symlink_mounts(pwd)
+        mounts = collect_symlink_mounts(pwd, extra_prune=project_config.extra_prune)
         for target, mode in mounts:
             args += ["-v", f"{target}:{target}:{mode}"]
             print(f"claude-sandbox: mounting symlink target {target} ({mode})", file=sys.stderr)

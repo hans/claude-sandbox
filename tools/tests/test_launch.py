@@ -331,13 +331,18 @@ class TestSeparateVenv:
     """
 
     def test_uv_project_environment_in_docker_args(self, tmp_home, tmp_worktree, monkeypatch):
-        """UV_PROJECT_ENVIRONMENT=/workdir/.venv-container must appear in docker args."""
+        """UV_PROJECT_ENVIRONMENT=/workdir/.venv-container must appear in docker args.
+
+        Post neutral-core refactor, the uv env comes from a ProjectConfig
+        (loaded from .claude-sandbox.toml) rather than being hard-coded.
+        """
         args = launch.build_docker_args(
             name="test-container",
             pwd=str(tmp_worktree),
             image="claude-sandbox:latest",
             network="bridge",
             claude_json_tmp="/tmp/fake-claude-json",
+            project_config=_uv_project_config(),
         )
         env_args = _extract_env_args(args)
         assert "UV_PROJECT_ENVIRONMENT=/workdir/.venv-container" in env_args, (
@@ -538,6 +543,7 @@ class TestSharedUvCache:
             image="claude-sandbox:latest",
             network="bridge",
             claude_json_tmp="/tmp/fake-claude-json",
+            project_config=_uv_project_config(),
         )
         home = str(pathlib.Path.home())
         mounts = _extract_volume_mounts(args)
@@ -556,6 +562,7 @@ class TestSharedUvCache:
             image="claude-sandbox:latest",
             network="bridge",
             claude_json_tmp="/tmp/fake-claude-json",
+            project_config=_uv_project_config(),
         )
         env_args = _extract_env_args(args)
         assert "UV_CACHE_DIR=/home/claude/.cache/uv" in env_args, (
@@ -712,8 +719,93 @@ class TestAnthropicEnvForwarding:
 
 
 # ===========================================================================
+# 12. Project config — neutral core, toml loading, fail-loud parsing
+# ===========================================================================
+
+class TestProjectConfig:
+    """uv/Node assumptions come from .claude-sandbox.toml, not the core."""
+
+    def test_neutral_core_emits_no_uv_vars(self, tmp_home, tmp_worktree):
+        """With no .claude-sandbox.toml, the core emits no uv env/mounts."""
+        args = launch.build_docker_args(
+            name="c", pwd=str(tmp_worktree), image="img", network="bridge",
+            claude_json_tmp="/tmp/fake",
+        )
+        env_args = _extract_env_args(args)
+        assert not any(e.startswith("UV_") for e in env_args), (
+            f"Toolchain-neutral core must not emit UV_* vars, got: {env_args}"
+        )
+
+    def test_toml_loaded_into_env_and_mounts(self, tmp_worktree, tmp_home):
+        """A .claude-sandbox.toml populates ProjectConfig env + mounts (with ~ expanded)."""
+        (tmp_worktree / ".claude-sandbox.toml").write_text(
+            '[env]\n'
+            'UV_PROJECT_ENVIRONMENT = "/workdir/.venv-container"\n'
+            '[[mounts]]\n'
+            'host = "~/.cache/uv"\n'
+            'container = "/home/claude/.cache/uv"\n'
+            'mode = "rw"\n'
+        )
+        cfg = launch.load_project_config(str(tmp_worktree))
+        assert cfg.env["UV_PROJECT_ENVIRONMENT"] == "/workdir/.venv-container"
+        home = str(pathlib.Path.home())
+        assert (f"{home}/.cache/uv", "/home/claude/.cache/uv", "rw") in cfg.mounts
+
+    def test_toml_top_level_prune_reaches_config(self, tmp_worktree):
+        """A top-level `prune` key must reach ProjectConfig.extra_prune.
+
+        Guards the TOML gotcha: a `prune` placed after a [table] header is
+        parsed into that table, not the top level, and would be silently
+        dropped. Top-level keys must precede all tables.
+        """
+        (tmp_worktree / ".claude-sandbox.toml").write_text(
+            'prune = ["target", "dist"]\n'
+            '[env]\n'
+            'FOO = "bar"\n'
+        )
+        cfg = launch.load_project_config(str(tmp_worktree))
+        assert cfg.extra_prune == {"target", "dist"}, (
+            f"top-level prune should reach extra_prune, got: {cfg.extra_prune}"
+        )
+
+    def test_prune_names_extend_symlink_scan(self, tmp_path, tmp_worktree):
+        """prune entries in project config are skipped by the symlink scan."""
+        external = tmp_path / "ext"
+        external.mkdir()
+        (external / "f").write_text("x")
+        pruned = tmp_worktree / "target_dir"
+        pruned.mkdir()
+        (pruned / "link").symlink_to(external)
+        mounts = launch.collect_symlink_mounts(str(tmp_worktree), extra_prune={"target_dir"})
+        assert str(external) not in [t for t, _ in mounts]
+
+    def test_unparseable_toml_fails_loud(self, tmp_worktree):
+        """A present-but-broken .claude-sandbox.toml exits non-zero, never silently defaults."""
+        (tmp_worktree / ".claude-sandbox.toml").write_text("this is = = not toml ][")
+        with pytest.raises(SystemExit) as exc:
+            launch.load_project_config(str(tmp_worktree))
+        assert exc.value.code != 0
+
+
+# ===========================================================================
 # Helper functions
 # ===========================================================================
+
+def _uv_project_config() -> "launch.ProjectConfig":
+    """The Python/uv ProjectConfig this repo ships in .claude-sandbox.toml.
+
+    Built explicitly so the uv tests assert the "config in → args out" contract
+    rather than relying on the (now toolchain-neutral) core to emit uv vars.
+    """
+    home = str(pathlib.Path.home())
+    return launch.ProjectConfig(
+        env={
+            "UV_PROJECT_ENVIRONMENT": "/workdir/.venv-container",
+            "UV_CACHE_DIR": "/home/claude/.cache/uv",
+        },
+        mounts=[(f"{home}/.cache/uv", "/home/claude/.cache/uv", "rw")],
+    )
+
 
 def _extract_volume_mounts(args: list[str]) -> list[str]:
     """Return all -v argument values from a docker args list."""
