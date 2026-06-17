@@ -566,10 +566,10 @@ def docker_run(args: list[str], image: str) -> None:
     )
 
 
-def docker_exec(name: str, claude_argv: list[str]) -> int:
-    """Attach an interactive claude session; return the exit code."""
+def docker_exec(name: str, container_argv: list[str]) -> int:
+    """Attach an interactive session running *container_argv*; return its exit code."""
     result = subprocess.run(
-        ["docker", "exec", "-it", name, "/usr/local/bin/entrypoint.sh"] + claude_argv,
+        ["docker", "exec", "-it", name, "/usr/local/bin/entrypoint.sh"] + container_argv,
     )
     return result.returncode
 
@@ -583,8 +583,17 @@ def main() -> None:
     network = os.environ.get("CLAUDE_SANDBOX_NETWORK", "bridge")
     pwd = os.getcwd()
 
-    # --- prompt detection ---------------------------------------------------
-    prompt = detect_prompt(sys.argv[1:])
+    # --- mode: agent (default) vs interactive shell -------------------------
+    # `launch.py --shell` opens a bash shell in the same per-worktree container
+    # instead of launching the agent. Both modes share the one arg-builder
+    # below, so the container environment (mounts, network, uv, host profile)
+    # is identical whether you're in the agent or poking around by hand.
+    argv_tail = sys.argv[1:]
+    shell_mode = "--shell" in argv_tail
+    argv_tail = [a for a in argv_tail if a != "--shell"]
+
+    # --- prompt detection (agent mode only) ---------------------------------
+    prompt = "" if shell_mode else detect_prompt(argv_tail)
 
     # --- preflight ----------------------------------------------------------
     preflight_checks(image)
@@ -604,16 +613,19 @@ def main() -> None:
     claude_json_tmp = make_claude_json_tmp(name)
     atexit.register(cleanup_claude_json_tmp, claude_json_tmp)
 
-    # --- build claude argv --------------------------------------------------
-    claude_argv = ["claude"]
-    if os.environ.get("CLAUDE_SANDBOX_SKIP_PERMISSIONS", "1") == "1":
-        claude_argv.append("--dangerously-skip-permissions")
-    if prompt:
-        claude_argv.append(prompt)
+    # --- build in-container command -----------------------------------------
+    if shell_mode:
+        container_argv = ["bash"]
+    else:
+        container_argv = ["claude"]
+        if os.environ.get("CLAUDE_SANDBOX_SKIP_PERMISSIONS", "1") == "1":
+            container_argv.append("--dangerously-skip-permissions")
+        if prompt:
+            container_argv.append(prompt)
 
     # --- reattach if container already running ------------------------------
     if container_is_running(name):
-        rc = docker_exec(name, claude_argv)
+        rc = docker_exec(name, container_argv)
         sys.exit(rc)
 
     # Fresh container: extract macOS keychain credentials now.
@@ -631,8 +643,8 @@ def main() -> None:
 
     docker_run(docker_args, image)
 
-    # Attach an interactive claude session.
-    rc = docker_exec(name, claude_argv)
+    # Attach an interactive session (agent or shell).
+    rc = docker_exec(name, container_argv)
     sys.exit(rc)
 
 
