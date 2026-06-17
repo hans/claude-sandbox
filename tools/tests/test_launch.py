@@ -719,6 +719,53 @@ class TestAnthropicEnvForwarding:
 
 
 # ===========================================================================
+# 11. Host (launcher) profiles — env-sniff + explicit selection
+# ===========================================================================
+
+class TestHostProfiles:
+    """Launcher coupling lives in HostProfile, selected by env-sniff or override."""
+
+    def test_generic_by_default_no_superset_forwarding(self, tmp_home, tmp_worktree, monkeypatch):
+        """With no SUPERSET_* vars, nothing Superset-specific is forwarded."""
+        for k in list(os.environ):
+            if k.startswith("SUPERSET_"):
+                monkeypatch.delenv(k, raising=False)
+        monkeypatch.delenv("CLAUDE_SANDBOX_HOST", raising=False)
+        assert launch.detect_host_profile(os.environ) is launch.GENERIC_HOST
+
+    def test_superset_autodetected_from_env(self, monkeypatch):
+        """Presence of any SUPERSET_* var selects the superset profile."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_HOST", raising=False)
+        monkeypatch.setenv("SUPERSET_AGENT_ID", "agent-1")
+        assert launch.detect_host_profile(os.environ) is launch.SUPERSET_HOST
+
+    def test_explicit_generic_overrides_superset_env(self, monkeypatch):
+        """CLAUDE_SANDBOX_HOST=generic wins even when SUPERSET_* is present."""
+        monkeypatch.setenv("SUPERSET_AGENT_ID", "agent-1")
+        monkeypatch.setenv("CLAUDE_SANDBOX_HOST", "generic")
+        assert launch.detect_host_profile(os.environ) is launch.GENERIC_HOST
+
+    def test_unknown_host_falls_back_to_generic_with_warning(self, monkeypatch, capsys):
+        """An unknown CLAUDE_SANDBOX_HOST warns and falls back to generic."""
+        monkeypatch.setenv("CLAUDE_SANDBOX_HOST", "bogus")
+        profile = launch.detect_host_profile(os.environ)
+        assert profile is launch.GENERIC_HOST
+        assert "bogus" in capsys.readouterr().err
+
+    def test_generic_profile_does_not_forward_superset(self, tmp_home, tmp_worktree, monkeypatch):
+        """Under the generic profile, SUPERSET_* vars are NOT forwarded."""
+        monkeypatch.setenv("SUPERSET_SECRET", "should-not-leak")
+        args = launch.build_docker_args(
+            name="c", pwd=str(tmp_worktree), image="img", network="bridge",
+            claude_json_tmp="/tmp/fake", host_profile=launch.GENERIC_HOST,
+        )
+        env_args = _extract_env_args(args)
+        assert not any(e.startswith("SUPERSET_") for e in env_args), (
+            f"Generic profile must not forward SUPERSET_* vars, got: {env_args}"
+        )
+
+
+# ===========================================================================
 # 12. Project config — neutral core, toml loading, fail-loud parsing
 # ===========================================================================
 

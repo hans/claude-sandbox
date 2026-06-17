@@ -73,6 +73,70 @@ def detect_prompt(argv_tail: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Host (launcher) profiles
+# ---------------------------------------------------------------------------
+# A "host profile" captures everything that's specific to the launcher driving
+# this script (Superset, a bare terminal, CI, ...). The sandbox core stays
+# launcher-agnostic; the profile only adds env-var forwarding, value rewrites,
+# and extra mounts on top of it. Note: ANTHROPIC_* forwarding and the
+# host.docker.internal mapping are NOT here -- they're the Claude/agent axis and
+# the generic container baseline, so they apply unconditionally.
+
+
+@dataclass(frozen=True)
+class HostProfile:
+    name: str
+    # Env-var name prefixes to forward into the container (as KEY=VALUE).
+    env_prefixes: tuple = ()
+    # (compiled-regex, replacement) pairs applied to each forwarded value.
+    rewrites: tuple = ()
+    # Names of env vars whose value is a host dir to bind-mount at the same path.
+    mount_envs: tuple = ()
+
+
+GENERIC_HOST = HostProfile(name="generic")
+
+_LOCALHOST_RE = re.compile(r"\b(localhost|127\.0\.0\.1)\b")
+
+# Superset injects callback URLs (notifications, IPC) via SUPERSET_* env vars,
+# often containing localhost/127.0.0.1. Inside a bridge-networked container
+# those resolve to the container's own loopback, so we rewrite them to
+# host.docker.internal. SUPERSET_HOME_DIR is bind-mounted so in-container
+# notification helpers can reach Superset's socket.
+SUPERSET_HOST = HostProfile(
+    name="superset",
+    env_prefixes=("SUPERSET_",),
+    rewrites=((_LOCALHOST_RE, "host.docker.internal"),),
+    mount_envs=("SUPERSET_HOME_DIR",),
+)
+
+_HOST_PROFILES = {p.name: p for p in (GENERIC_HOST, SUPERSET_HOST)}
+
+
+def detect_host_profile(env) -> HostProfile:
+    """Return the HostProfile for the current launcher.
+
+    Selection: explicit CLAUDE_SANDBOX_HOST wins; otherwise auto-detect by
+    sniffing for launcher-specific env vars (any SUPERSET_* → superset);
+    otherwise the generic profile.
+    """
+    explicit = env.get("CLAUDE_SANDBOX_HOST", "").strip().lower()
+    if explicit:
+        profile = _HOST_PROFILES.get(explicit)
+        if profile is not None:
+            return profile
+        print(
+            f"claude-sandbox: unknown CLAUDE_SANDBOX_HOST={explicit!r}; "
+            f"using generic. Known: {', '.join(sorted(_HOST_PROFILES))}.",
+            file=sys.stderr,
+        )
+        return GENERIC_HOST
+    if any(k.startswith("SUPERSET_") for k in env):
+        return SUPERSET_HOST
+    return GENERIC_HOST
+
+
+# ---------------------------------------------------------------------------
 # Project (workload) configuration
 # ---------------------------------------------------------------------------
 # Per-project tooling assumptions (which venv dir, which caches to share, which
@@ -384,14 +448,17 @@ def build_docker_args(
     image: str,
     network: str,
     claude_json_tmp: str,
+    host_profile: "HostProfile | None" = None,
     project_config: "ProjectConfig | None" = None,
 ) -> list[str]:
     """Return the full argument list for `docker run` (excluding the image/cmd).
 
     This is a pure function (aside from reading env vars and the filesystem)
-    so it can be unit-tested without invoking Docker. *project_config* defaults
-    to auto-detection from the worktree's .claude-sandbox.toml.
+    so it can be unit-tested without invoking Docker. *host_profile* and
+    *project_config* default to auto-detection from the environment / worktree.
     """
+    if host_profile is None:
+        host_profile = detect_host_profile(os.environ)
     if project_config is None:
         project_config = load_project_config(pwd)
 
@@ -446,7 +513,7 @@ def build_docker_args(
             args += ["-v", f"{target}:{target}:{mode}"]
             print(f"claude-sandbox: mounting symlink target {target} ({mode})", file=sys.stderr)
 
-    # Forward ANTHROPIC_* env vars
+    # Forward ANTHROPIC_* env vars (the Claude/agent axis -- always on).
     for key in sorted(os.environ):
         if key.startswith("ANTHROPIC_"):
             args += ["-e", key]
@@ -454,24 +521,23 @@ def build_docker_args(
     # Make the host reachable as host.docker.internal from inside the container.
     # Docker Desktop (macOS/Windows) provides this automatically; on Linux we
     # need the explicit --add-host mapping.  Bridge-networked containers resolve
-    # "localhost" to their own loopback, so Superset notification endpoints that
-    # use localhost/127.0.0.1 would silently fail without this.
+    # "localhost" to their own loopback, so launcher callback endpoints that use
+    # localhost/127.0.0.1 would silently fail without this.
     args += ["--add-host", "host.docker.internal:host-gateway"]
 
-    # Forward SUPERSET_* env vars, rewriting localhost/127.0.0.1 references to
-    # host.docker.internal so that notification callbacks (e.g. PushNotification)
-    # reach the host process rather than the container's own loopback.
-    _localhost_re = re.compile(r'\b(localhost|127\.0\.0\.1)\b')
+    # Host (launcher) profile: forward its env vars (rewriting localhost
+    # references so callbacks reach the host, not the container loopback) and
+    # bind-mount any directories it points at.
     for key in sorted(os.environ):
-        if key.startswith("SUPERSET_"):
+        if any(key.startswith(prefix) for prefix in host_profile.env_prefixes):
             value = os.environ[key]
-            rewritten = _localhost_re.sub("host.docker.internal", value)
-            args += ["-e", f"{key}={rewritten}"]
-
-    # Mount SUPERSET_HOME_DIR if set and exists
-    superset_home = os.environ.get("SUPERSET_HOME_DIR", "")
-    if superset_home and pathlib.Path(superset_home).is_dir():
-        args += ["-v", f"{superset_home}:{superset_home}"]
+            for pattern, repl in host_profile.rewrites:
+                value = pattern.sub(repl, value)
+            args += ["-e", f"{key}={value}"]
+    for env_name in host_profile.mount_envs:
+        mount_dir = os.environ.get(env_name, "")
+        if mount_dir and pathlib.Path(mount_dir).is_dir():
+            args += ["-v", f"{mount_dir}:{mount_dir}"]
 
     return args
 
