@@ -628,8 +628,10 @@ def main() -> None:
         rc = docker_exec(name, container_argv)
         sys.exit(rc)
 
-    # Fresh container: extract macOS keychain credentials now.
-    if macos_creds:
+    # Fresh container: bootstrap credentials from macOS keychain if needed.
+    # Skip if the file already exists — the on-disk copy is more current than
+    # the keychain when other containers have refreshed tokens mid-session.
+    if macos_creds and not pathlib.Path(macos_creds).exists():
         extract_macos_credentials(pathlib.Path(macos_creds))
 
     # --- build docker run args and launch -----------------------------------

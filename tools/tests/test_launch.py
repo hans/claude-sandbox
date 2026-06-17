@@ -523,6 +523,29 @@ class TestMacosCredentialSync:
         launch.sync_credentials_back("")  # empty → no-op
         assert not called, "security should not be called when macos_creds is empty"
 
+    def test_extract_skipped_when_credentials_file_exists(self, tmp_path, monkeypatch):
+        """extract_macos_credentials must not be called if the file already exists.
+
+        Before fix: launching a second container would call extract_macos_credentials
+        unconditionally, overwriting the on-disk copy with a potentially stale keychain
+        blob, logging out all currently-running containers mid-session.
+        """
+        creds_file = tmp_path / ".credentials.json"
+        existing = '{"token": "live-session-token"}'
+        creds_file.write_text(existing)
+
+        extract_called = []
+        monkeypatch.setattr(launch, "extract_macos_credentials", lambda p: extract_called.append(p))
+
+        macos_creds = str(creds_file)
+        if macos_creds and not pathlib.Path(macos_creds).exists():
+            launch.extract_macos_credentials(pathlib.Path(macos_creds))
+
+        assert not extract_called, (
+            "extract_macos_credentials must be skipped when the credentials file already exists"
+        )
+        assert creds_file.read_text() == existing, "existing credentials must not be overwritten"
+
 
 # ===========================================================================
 # 10. Shared uv cache across containers (commit aa0c5e9)
