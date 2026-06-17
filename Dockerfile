@@ -1,8 +1,9 @@
-# claude-sandbox: container image used by Superset to run Claude Code agents
-# with the workspace worktree bind-mounted at /workdir.
+# claude-sandbox: container image that runs a Claude Code agent with the
+# workspace worktree bind-mounted at /workdir. Launcher-agnostic (Superset,
+# a bare terminal, CI, ...).
 #
 # Build:  docker build -t claude-sandbox:latest .
-# Run:    handled by .superset/launch.sh (see README.md)
+# Run:    handled by tools/launch.sh (see README.md)
 
 FROM ubuntu:24.04
 

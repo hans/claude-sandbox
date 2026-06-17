@@ -37,32 +37,38 @@ Should print the Claude Code version.
 
 ## 3. Put the launch scripts where Superset can find them
 
-`launch.sh` is intentionally a relative-path script (`.superset/launch.sh`)
+`launch.sh` is intentionally a relative-path script (`tools/launch.sh`)
 so each repo carries its own copy and you can customize per project. Two
 ways to deploy it.
 
-**Per repo (recommended).** Copy the `.superset/` directory into each
+**Per repo (recommended).** Copy the `tools/` directory into each
 repo you want to sandbox:
 
 ```
-cp -r .superset /path/to/your/repo/
+cp -r tools /path/to/your/repo/
 cd /path/to/your/repo/
-git add .superset/
+git add tools/
 git commit -m "Add Superset sandbox launcher"
 ```
 
 The launcher reads `CLAUDE_SANDBOX_IMAGE` so projects can override the
 image; the default `claude-sandbox:latest` works fine for most.
 
+> The core is toolchain-neutral: it emits no `UV_*` env or cache mounts
+> unless the worktree has a `.claude-sandbox.toml`. If your project uses
+> Python/uv, copy this repo's `.claude-sandbox.toml` too (or write your own) —
+> otherwise you lose the container-private venv. See README → *Per-project
+> configuration*.
+
 **Global (one script for everything).** If you'd rather not copy files into
 each repo, drop `launch.sh` somewhere on your PATH and point Superset at
 the absolute path:
 
 ```
-install -m 755 .superset/launch.sh ~/bin/claude-sandbox-launch
+install -m 755 tools/launch.sh ~/bin/claude-sandbox-launch
 ```
 
-Then use `~/bin/claude-sandbox-launch` instead of `.superset/launch.sh` in
+Then use `~/bin/claude-sandbox-launch` instead of `tools/launch.sh` in
 the Superset config below.
 
 ## 4. Configure a Superset agent
@@ -83,21 +89,21 @@ like this:
 |------------------------|------------------------------------------|
 | Label                  | `Claude (sandbox)` (or anything memorable) |
 | Enabled                | ON                                       |
-| Command (No Prompt)    | `.superset/launch.sh`                    |
-| Command (With Prompt)  | `.superset/launch.sh`                    |
+| Command (No Prompt)    | `tools/launch.sh`                        |
+| Command (With Prompt)  | `tools/launch.sh`                        |
 | Prompt Command Suffix  | *(leave empty)*                          |
 | Task Prompt Template   | *(leave default)*                        |
 | Model Override         | *(leave empty unless you want one)*      |
 
 If you went with the global-script approach in step 3, replace
-`.superset/launch.sh` with `/Users/you/bin/claude-sandbox-launch`.
+`tools/launch.sh` with `/Users/you/bin/claude-sandbox-launch`.
 
 Save the agent.
 
 ## 5. Launch it in a workspace
 
 1. Open or create a workspace pointing at one of the repos where you
-   deployed `.superset/launch.sh`.
+   deployed `tools/launch.sh`.
 2. Pick your new "Claude (sandbox)" agent from the agent picker.
 3. Type a prompt and hit launch.
 

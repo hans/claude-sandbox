@@ -1,4 +1,4 @@
-"""Test suite for .superset/launch.py
+"""Test suite for tools/launch.py
 
 All tests mock subprocess so no real Docker installation is needed.
 """
