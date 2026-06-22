@@ -241,9 +241,9 @@ def preflight_checks(image: str) -> None:
         print(f"claude-sandbox: image '{image}' not found.", file=sys.stderr)
         print("  Pull the prebuilt image:", file=sys.stderr)
         print("    docker pull jrgauthier/claude-sandbox", file=sys.stderr)
-        print("    docker tag jrgauthier/claude-sandbox claude-sandbox:latest", file=sys.stderr)
         print("  ...or build it from the repo root:", file=sys.stderr)
-        print("    docker build -t claude-sandbox:latest .", file=sys.stderr)
+        print("    docker build -t jrgauthier/claude-sandbox:latest .", file=sys.stderr)
+        print("  (override the image with CLAUDE_SANDBOX_IMAGE.)", file=sys.stderr)
         sys.exit(1)
 
     # ~/.claude/ dir and ~/.claude.json file present?
@@ -632,7 +632,7 @@ def docker_exec(name: str, container_argv: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    image = os.environ.get("CLAUDE_SANDBOX_IMAGE", "claude-sandbox:latest")
+    image = os.environ.get("CLAUDE_SANDBOX_IMAGE", "jrgauthier/claude-sandbox:latest")
     network = os.environ.get("CLAUDE_SANDBOX_NETWORK", "bridge")
     pwd = os.getcwd()
 

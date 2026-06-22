@@ -21,10 +21,9 @@ Deliberately *not* a Container Use (`cu`) setup: the host worktree is the source
 Assuming you've got Docker and you've logged into Claude on the host once (`claude /login`):
 
 ```bash
-# 1. Get the image. Pull the prebuilt one (no build needed):
+# 1. Get the image. Pull the prebuilt one (no build or retag needed):
 docker pull jrgauthier/claude-sandbox
-docker tag jrgauthier/claude-sandbox claude-sandbox:latest
-#     ...or build your own: `docker build -t claude-sandbox:latest .`
+#     ...or build your own: `docker build -t jrgauthier/claude-sandbox:latest .`
 
 # 2a. Bare terminal: from any worktree, just run the launcher.
 cd /path/to/worktree && /path/to/claude-sandbox/tools/launch.sh
@@ -95,19 +94,18 @@ A common gotcha: the agent spins up a dev server on port `3000` inside the conta
 
 ## Get the image
 
-A prebuilt image is published on Docker Hub, so you don't have to build it yourself. Pull it and tag it as the default name the launcher expects:
+A prebuilt image is published on Docker Hub, and it's the launcher's default — no build or retag needed. Just pull it:
 
 ```
 docker pull jrgauthier/claude-sandbox
-docker tag jrgauthier/claude-sandbox claude-sandbox:latest
 ```
 
-(Or skip the retag and point the launcher at it directly: `export CLAUDE_SANDBOX_IMAGE=jrgauthier/claude-sandbox`.)
+(To run a different image, point the launcher at it: `export CLAUDE_SANDBOX_IMAGE=your/image:tag`.)
 
 Prefer to build it yourself — to pin a base image, audit the layers, or hack on the `Dockerfile`:
 
 ```
-docker build -t claude-sandbox:latest .
+docker build -t jrgauthier/claude-sandbox:latest .
 ```
 
 Rebuild only when the `Dockerfile` changes. Per-project tooling (extra Python deps, system libs) goes in a downstream image — see below.
@@ -150,7 +148,7 @@ The global `claude-sandbox` image stays generic. Two ways to add per-project too
 **Persistent:** drop a `Dockerfile.project` in your project:
 
 ```dockerfile
-FROM claude-sandbox:latest
+FROM jrgauthier/claude-sandbox:latest
 RUN pip install --break-system-packages mne nibabel
 ```
 
@@ -195,7 +193,7 @@ Set in **Superset → Settings → Agents → your agent → Environment**, one 
 
 | Variable                            | Purpose                                                                                                                | Default                  |
 |-------------------------------------|------------------------------------------------------------------------------------------------------------------------|--------------------------|
-| `CLAUDE_SANDBOX_IMAGE`              | Docker image to run                                                                                                    | `claude-sandbox:latest`  |
+| `CLAUDE_SANDBOX_IMAGE`              | Docker image to run                                                                                                    | `jrgauthier/claude-sandbox:latest` |
 | `CLAUDE_SANDBOX_HOST`               | Host (launcher) profile: `generic` / `superset`. Auto-detected if unset (any `SUPERSET_*` var → `superset`)             | auto                     |
 | `CLAUDE_SANDBOX_NETWORK`            | `--network` value: `bridge` / `host` / `none` / custom network name                                                    | `bridge`                 |
 | `CLAUDE_SANDBOX_MOUNT_SSH`          | Set to `1` to mount `~/.ssh` read-only (for git push over SSH)                                                         | unset (off)              |
