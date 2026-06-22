@@ -1,5 +1,9 @@
 # claude-sandbox
 
+[![Docker Hub](https://img.shields.io/docker/v/jrgauthier/claude-sandbox?logo=docker&logoColor=white&label=Docker%20Hub&sort=semver&arch=arm64)](https://hub.docker.com/r/jrgauthier/claude-sandbox)
+[![Image size](https://img.shields.io/docker/image-size/jrgauthier/claude-sandbox/latest?logo=docker&label=image%20size&arch=arm64)](https://hub.docker.com/r/jrgauthier/claude-sandbox)
+[![Pulls](https://img.shields.io/docker/pulls/jrgauthier/claude-sandbox?logo=docker&label=pulls)](https://hub.docker.com/r/jrgauthier/claude-sandbox)
+
 A per-workspace Docker sandbox for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 Point any launcher at `tools/launch.sh` and every workspace you open gets its own throwaway container with the worktree bind-mounted at `/workdir`. The agent runs its bash tool inside the container; your files, git history, and diffs stay on the host. The container is just a blast radius.
@@ -17,8 +21,10 @@ Deliberately *not* a Container Use (`cu`) setup: the host worktree is the source
 Assuming you've got Docker and you've logged into Claude on the host once (`claude /login`):
 
 ```bash
-# 1. Build the image. You do this once per Dockerfile change.
-docker build -t claude-sandbox:latest .
+# 1. Get the image. Pull the prebuilt one (no build needed):
+docker pull jrgauthier/claude-sandbox
+docker tag jrgauthier/claude-sandbox claude-sandbox:latest
+#     ...or build your own: `docker build -t claude-sandbox:latest .`
 
 # 2a. Bare terminal: from any worktree, just run the launcher.
 cd /path/to/worktree && /path/to/claude-sandbox/tools/launch.sh
@@ -87,7 +93,18 @@ A common gotcha: the agent spins up a dev server on port `3000` inside the conta
 - A launcher — [Superset](https://superset.sh), or just a terminal.
 - Claude Code installed and logged in on the host: `claude /login`. That creates `~/.claude` which the container mounts.
 
-## Build the image
+## Get the image
+
+A prebuilt image is published on Docker Hub, so you don't have to build it yourself. Pull it and tag it as the default name the launcher expects:
+
+```
+docker pull jrgauthier/claude-sandbox
+docker tag jrgauthier/claude-sandbox claude-sandbox:latest
+```
+
+(Or skip the retag and point the launcher at it directly: `export CLAUDE_SANDBOX_IMAGE=jrgauthier/claude-sandbox`.)
+
+Prefer to build it yourself — to pin a base image, audit the layers, or hack on the `Dockerfile`:
 
 ```
 docker build -t claude-sandbox:latest .

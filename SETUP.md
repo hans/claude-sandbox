@@ -16,9 +16,21 @@ security find-generic-password -s "Claude Code-credentials" -w >/dev/null \
 
 If any of these fails, fix it before continuing.
 
-## 2. Build the image once
+## 2. Get the image once
 
-From this directory (`superset-docker-sandbox/`):
+A prebuilt image is published on Docker Hub, so you don't have to build it
+yourself. Pull it and tag it as the default name the launcher expects:
+
+```
+docker pull jrgauthier/claude-sandbox
+docker tag jrgauthier/claude-sandbox claude-sandbox:latest
+```
+
+(Or skip the retag and set `CLAUDE_SANDBOX_IMAGE=jrgauthier/claude-sandbox`
+in the agent's Environment field in step 4.)
+
+Prefer to build it yourself — to pin a base image or hack on the
+`Dockerfile`? From this directory:
 
 ```
 docker build -t claude-sandbox:latest .
@@ -27,7 +39,7 @@ docker build -t claude-sandbox:latest .
 Takes ~2 minutes on first build, seconds on subsequent rebuilds (layer
 cache). You only need to do this again when the `Dockerfile` changes.
 
-Verify:
+Verify (either way):
 
 ```
 docker run --rm claude-sandbox:latest claude --version
@@ -164,10 +176,32 @@ Or export it before starting Superset.
 | Symptom                                                          | Cause                                                                 | Fix                                                                                       |
 |------------------------------------------------------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
 | `docker: command not found`                                      | Docker not on PATH                                                    | Open Docker Desktop / install Docker engine.                                              |
-| `claude-sandbox: image 'claude-sandbox:latest' not found.`       | Image not built yet                                                   | `docker build -t claude-sandbox:latest .` from this dir.                                  |
+| `claude-sandbox: image 'claude-sandbox:latest' not found.`       | Image not pulled/built yet                                            | `docker pull jrgauthier/claude-sandbox && docker tag jrgauthier/claude-sandbox claude-sandbox:latest` (or `docker build -t claude-sandbox:latest .`). |
 | `Claude configuration file not found at: /home/claude/.claude.json` | Host `~/.claude.json` missing or container was started before fix | Run `claude /login` on host; `docker rm -f` any stale container; relaunch.                |
 | `couldn't read 'Claude Code-credentials' from keychain`          | macOS keychain entry missing                                          | Run `claude /login` on the host.                                                          |
 | `fatal: not a git repository` inside the container               | Worktree's `.git` pointer can't resolve                               | `launch.sh` should be auto-mounting the parent `.git` -- check the script is current.     |
 | `permission denied` writing files                                | Host UID isn't matching the bind mount                                | `launch.sh` uses `-u $(id -u):$(id -g)` so this should just work; check you haven't overridden it. |
+
+## 9. (Maintainers) CI and image publishing
+
+Two GitHub Actions workflows live in `.github/workflows/`:
+
+- **`ci.yml`** — on every push and PR: runs `pytest tools/tests` on Python
+  3.9–3.12 and builds the image (no push) as a Dockerfile smoke test. No
+  secrets needed.
+- **`release.yml`** — on a pushed version tag (`git tag v0.2 && git push
+  origin v0.2`): builds a multi-arch image (`linux/amd64,linux/arm64`) and
+  pushes `jrgauthier/claude-sandbox:<tag>` and `:latest` to Docker Hub.
+
+`release.yml` needs two repository secrets — **Settings → Secrets and
+variables → Actions → New repository secret**:
+
+| Secret               | Value                                                                  |
+|----------------------|------------------------------------------------------------------------|
+| `DOCKERHUB_USERNAME` | your Docker Hub account (`jrgauthier`)                                  |
+| `DOCKERHUB_TOKEN`    | a Docker Hub **access token** (Docker Hub → Account → Security), not your password |
+
+Cutting a release is then just: bump the tag, push it, and the multi-arch
+image lands on Docker Hub automatically.
 
 For deeper details on what each piece does, see `README.md`.

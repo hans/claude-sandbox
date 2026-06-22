@@ -239,7 +239,10 @@ def preflight_checks(image: str) -> None:
     )
     if result.returncode != 0:
         print(f"claude-sandbox: image '{image}' not found.", file=sys.stderr)
-        print("  Build it from the repo root:", file=sys.stderr)
+        print("  Pull the prebuilt image:", file=sys.stderr)
+        print("    docker pull jrgauthier/claude-sandbox", file=sys.stderr)
+        print("    docker tag jrgauthier/claude-sandbox claude-sandbox:latest", file=sys.stderr)
+        print("  ...or build it from the repo root:", file=sys.stderr)
         print("    docker build -t claude-sandbox:latest .", file=sys.stderr)
         sys.exit(1)
 
