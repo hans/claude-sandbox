@@ -1,0 +1,20 @@
+# claude-sandbox project config (optional, per-worktree).
+#
+# The sandbox core makes no language/toolchain assumptions. This file adds the
+# Python/uv setup this repo uses: a container-private venv, a shared uv cache,
+# and (implicitly) the default symlink prune list already covers .venv/.venv-
+# container/venv/node_modules. A Rust or Go checkout would ship a different file
+# (or none). See README "Per-project configuration".
+
+[env]
+# Keep the container's venv separate from the host's (binary-incompatible).
+UV_PROJECT_ENVIRONMENT = "/workdir/.venv-container"
+# Point uv at the shared, bind-mounted cache below.
+UV_CACHE_DIR = "/home/claude/.cache/uv"
+
+# Share the host's uv download cache across containers so packages aren't
+# re-downloaded per sandbox.
+[[mounts]]
+host = "~/.cache/uv"
+container = "/home/claude/.cache/uv"
+mode = "rw"

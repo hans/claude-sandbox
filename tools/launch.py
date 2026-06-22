@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, field
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +73,142 @@ def detect_prompt(argv_tail: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Host (launcher) profiles
+# ---------------------------------------------------------------------------
+# A "host profile" captures everything that's specific to the launcher driving
+# this script (Superset, a bare terminal, CI, ...). The sandbox core stays
+# launcher-agnostic; the profile only adds env-var forwarding, value rewrites,
+# and extra mounts on top of it. Note: ANTHROPIC_* forwarding and the
+# host.docker.internal mapping are NOT here -- they're the Claude/agent axis and
+# the generic container baseline, so they apply unconditionally.
+
+
+@dataclass(frozen=True)
+class HostProfile:
+    name: str
+    # Env-var name prefixes to forward into the container (as KEY=VALUE).
+    env_prefixes: tuple = ()
+    # (compiled-regex, replacement) pairs applied to each forwarded value.
+    rewrites: tuple = ()
+    # Names of env vars whose value is a host dir to bind-mount at the same path.
+    mount_envs: tuple = ()
+
+
+GENERIC_HOST = HostProfile(name="generic")
+
+_LOCALHOST_RE = re.compile(r"\b(localhost|127\.0\.0\.1)\b")
+
+# Superset injects callback URLs (notifications, IPC) via SUPERSET_* env vars,
+# often containing localhost/127.0.0.1. Inside a bridge-networked container
+# those resolve to the container's own loopback, so we rewrite them to
+# host.docker.internal. SUPERSET_HOME_DIR is bind-mounted so in-container
+# notification helpers can reach Superset's socket.
+SUPERSET_HOST = HostProfile(
+    name="superset",
+    env_prefixes=("SUPERSET_",),
+    rewrites=((_LOCALHOST_RE, "host.docker.internal"),),
+    mount_envs=("SUPERSET_HOME_DIR",),
+)
+
+_HOST_PROFILES = {p.name: p for p in (GENERIC_HOST, SUPERSET_HOST)}
+
+
+def detect_host_profile(env) -> HostProfile:
+    """Return the HostProfile for the current launcher.
+
+    Selection: explicit CLAUDE_SANDBOX_HOST wins; otherwise auto-detect by
+    sniffing for launcher-specific env vars (any SUPERSET_* → superset);
+    otherwise the generic profile.
+    """
+    explicit = env.get("CLAUDE_SANDBOX_HOST", "").strip().lower()
+    if explicit:
+        profile = _HOST_PROFILES.get(explicit)
+        if profile is not None:
+            return profile
+        print(
+            f"claude-sandbox: unknown CLAUDE_SANDBOX_HOST={explicit!r}; "
+            f"using generic. Known: {', '.join(sorted(_HOST_PROFILES))}.",
+            file=sys.stderr,
+        )
+        return GENERIC_HOST
+    if any(k.startswith("SUPERSET_") for k in env):
+        return SUPERSET_HOST
+    return GENERIC_HOST
+
+
+# ---------------------------------------------------------------------------
+# Project (workload) configuration
+# ---------------------------------------------------------------------------
+# Per-project tooling assumptions (which venv dir, which caches to share, which
+# subtrees to skip in the symlink scan) live in an optional .claude-sandbox.toml
+# at the worktree root -- NOT baked into the sandbox core. Absent the file, the
+# sandbox makes no language/toolchain assumptions. This repo ships a toml with
+# the Python/uv defaults; a Rust or Go checkout drops in its own (or none).
+
+
+@dataclass
+class ProjectConfig:
+    # Extra env vars to set inside the container (KEY=VALUE).
+    env: dict = field(default_factory=dict)
+    # Extra bind mounts as (host_path, container_path, mode) triples.
+    mounts: list = field(default_factory=list)
+    # Extra directory names to prune from the symlink-escape scan.
+    extra_prune: set = field(default_factory=set)
+
+
+def load_project_config(pwd: str) -> ProjectConfig:
+    """Load .claude-sandbox.toml from *pwd*; return an empty config if absent.
+
+    If the file exists but can't be parsed (or no TOML parser is available on
+    this Python), fail loud rather than silently ignoring it -- a present
+    config that says "don't use uv" must never be silently overridden by a
+    default that does.
+    """
+    path = pathlib.Path(pwd) / ".claude-sandbox.toml"
+    if not path.is_file():
+        return ProjectConfig()
+
+    try:
+        import tomllib  # Python 3.11+
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ModuleNotFoundError:
+            print(
+                f"claude-sandbox: found {path} but no TOML parser is available.",
+                file=sys.stderr,
+            )
+            print(
+                "  Run launch.py with Python 3.11+ or `pip install tomli`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except Exception as exc:  # noqa: BLE001 -- surface any parse error loudly
+        print(f"claude-sandbox: failed to parse {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    home = str(pathlib.Path.home())
+
+    def _expand(p: str) -> str:
+        return os.path.expanduser(os.path.expandvars(p)) if p else p
+
+    env = {str(k): str(v) for k, v in (data.get("env") or {}).items()}
+    mounts = []
+    for m in data.get("mounts") or []:
+        host = _expand(str(m.get("host", "")))
+        container = str(m.get("container", "")) or host
+        mode = str(m.get("mode", "rw"))
+        if host:
+            mounts.append((host, container, mode))
+    extra_prune = {str(n) for n in (data.get("prune") or [])}
+    return ProjectConfig(env=env, mounts=mounts, extra_prune=extra_prune)
+
+
+# ---------------------------------------------------------------------------
 # Preflight checks
 # ---------------------------------------------------------------------------
 
@@ -102,7 +239,10 @@ def preflight_checks(image: str) -> None:
     )
     if result.returncode != 0:
         print(f"claude-sandbox: image '{image}' not found.", file=sys.stderr)
-        print("  Build it from the repo root:", file=sys.stderr)
+        print("  Pull the prebuilt image:", file=sys.stderr)
+        print("    docker pull jrgauthier/claude-sandbox", file=sys.stderr)
+        print("    docker tag jrgauthier/claude-sandbox claude-sandbox:latest", file=sys.stderr)
+        print("  ...or build it from the repo root:", file=sys.stderr)
         print("    docker build -t claude-sandbox:latest .", file=sys.stderr)
         sys.exit(1)
 
@@ -244,15 +384,18 @@ def _symlink_mount_mode(target: str, pwd: str) -> str:
     return "ro"
 
 
-def collect_symlink_mounts(pwd: str) -> list[tuple[str, str]]:
+def collect_symlink_mounts(pwd: str, extra_prune=None) -> list[tuple[str, str]]:
     """Return deduplicated (target, mode) pairs for external symlinks in *pwd*.
 
-    Skips: .git, .venv, .venv-container, venv, node_modules subtrees.
+    Skips: .git plus common virtualenv/dep subtrees (.venv, .venv-container,
+    venv, node_modules) and any names in *extra_prune* (from project config).
     Skips: targets inside the worktree.
     Skips: targets that don't exist on disk.
     Deduplication: if the same target appears with rw and ro, prefer rw.
     """
     _PRUNE_NAMES = {".git", ".venv", ".venv-container", "venv", "node_modules"}
+    if extra_prune:
+        _PRUNE_NAMES = _PRUNE_NAMES | set(extra_prune)
     pwd_real = _resolve_path(pwd)
 
     # Gather {target -> mode}; when both rw and ro appear, keep rw.
@@ -308,12 +451,20 @@ def build_docker_args(
     image: str,
     network: str,
     claude_json_tmp: str,
+    host_profile: "HostProfile | None" = None,
+    project_config: "ProjectConfig | None" = None,
 ) -> list[str]:
     """Return the full argument list for `docker run` (excluding the image/cmd).
 
     This is a pure function (aside from reading env vars and the filesystem)
-    so it can be unit-tested without invoking Docker.
+    so it can be unit-tested without invoking Docker. *host_profile* and
+    *project_config* default to auto-detection from the environment / worktree.
     """
+    if host_profile is None:
+        host_profile = detect_host_profile(os.environ)
+    if project_config is None:
+        project_config = load_project_config(pwd)
+
     home = str(pathlib.Path.home())
     uid_gid = f"{os.getuid()}:{os.getgid()}"
 
@@ -326,12 +477,15 @@ def build_docker_args(
         "-v", f"{home}/.gitconfig:/home/claude/.gitconfig:ro",
         "-w", "/workdir",
         "-e", "HOME=/home/claude",
-        "-e", "UV_PROJECT_ENVIRONMENT=/workdir/.venv-container",
-        "-e", "UV_CACHE_DIR=/home/claude/.cache/uv",
-        "-v", f"{home}/.cache/uv:/home/claude/.cache/uv",
         "-u", uid_gid,
         "--network", network,
     ]
+
+    # Project (workload) env vars and mounts from .claude-sandbox.toml.
+    for key in sorted(project_config.env):
+        args += ["-e", f"{key}={project_config.env[key]}"]
+    for host_path, container_path, mode in project_config.mounts:
+        args += ["-v", f"{host_path}:{container_path}:{mode}"]
 
     # Port 8888 mapping
     args += ["-p", "8888"]
@@ -357,12 +511,12 @@ def build_docker_args(
 
     # Symlink mounts
     if os.environ.get("CLAUDE_SANDBOX_MOUNT_SYMLINKS", "1") == "1":
-        mounts = collect_symlink_mounts(pwd)
+        mounts = collect_symlink_mounts(pwd, extra_prune=project_config.extra_prune)
         for target, mode in mounts:
             args += ["-v", f"{target}:{target}:{mode}"]
             print(f"claude-sandbox: mounting symlink target {target} ({mode})", file=sys.stderr)
 
-    # Forward ANTHROPIC_* env vars
+    # Forward ANTHROPIC_* env vars (the Claude/agent axis -- always on).
     for key in sorted(os.environ):
         if key.startswith("ANTHROPIC_"):
             args += ["-e", key]
@@ -370,24 +524,23 @@ def build_docker_args(
     # Make the host reachable as host.docker.internal from inside the container.
     # Docker Desktop (macOS/Windows) provides this automatically; on Linux we
     # need the explicit --add-host mapping.  Bridge-networked containers resolve
-    # "localhost" to their own loopback, so Superset notification endpoints that
-    # use localhost/127.0.0.1 would silently fail without this.
+    # "localhost" to their own loopback, so launcher callback endpoints that use
+    # localhost/127.0.0.1 would silently fail without this.
     args += ["--add-host", "host.docker.internal:host-gateway"]
 
-    # Forward SUPERSET_* env vars, rewriting localhost/127.0.0.1 references to
-    # host.docker.internal so that notification callbacks (e.g. PushNotification)
-    # reach the host process rather than the container's own loopback.
-    _localhost_re = re.compile(r'\b(localhost|127\.0\.0\.1)\b')
+    # Host (launcher) profile: forward its env vars (rewriting localhost
+    # references so callbacks reach the host, not the container loopback) and
+    # bind-mount any directories it points at.
     for key in sorted(os.environ):
-        if key.startswith("SUPERSET_"):
+        if any(key.startswith(prefix) for prefix in host_profile.env_prefixes):
             value = os.environ[key]
-            rewritten = _localhost_re.sub("host.docker.internal", value)
-            args += ["-e", f"{key}={rewritten}"]
-
-    # Mount SUPERSET_HOME_DIR if set and exists
-    superset_home = os.environ.get("SUPERSET_HOME_DIR", "")
-    if superset_home and pathlib.Path(superset_home).is_dir():
-        args += ["-v", f"{superset_home}:{superset_home}"]
+            for pattern, repl in host_profile.rewrites:
+                value = pattern.sub(repl, value)
+            args += ["-e", f"{key}={value}"]
+    for env_name in host_profile.mount_envs:
+        mount_dir = os.environ.get(env_name, "")
+        if mount_dir and pathlib.Path(mount_dir).is_dir():
+            args += ["-v", f"{mount_dir}:{mount_dir}"]
 
     return args
 
@@ -416,10 +569,10 @@ def docker_run(args: list[str], image: str) -> None:
     )
 
 
-def docker_exec(name: str, claude_argv: list[str]) -> int:
-    """Attach an interactive claude session; return the exit code."""
+def docker_exec(name: str, container_argv: list[str]) -> int:
+    """Attach an interactive session running *container_argv*; return its exit code."""
     result = subprocess.run(
-        ["docker", "exec", "-it", name, "/usr/local/bin/entrypoint.sh"] + claude_argv,
+        ["docker", "exec", "-it", name, "/usr/local/bin/entrypoint.sh"] + container_argv,
     )
     return result.returncode
 
@@ -433,8 +586,17 @@ def main() -> None:
     network = os.environ.get("CLAUDE_SANDBOX_NETWORK", "bridge")
     pwd = os.getcwd()
 
-    # --- prompt detection ---------------------------------------------------
-    prompt = detect_prompt(sys.argv[1:])
+    # --- mode: agent (default) vs interactive shell -------------------------
+    # `launch.py --shell` opens a bash shell in the same per-worktree container
+    # instead of launching the agent. Both modes share the one arg-builder
+    # below, so the container environment (mounts, network, uv, host profile)
+    # is identical whether you're in the agent or poking around by hand.
+    argv_tail = sys.argv[1:]
+    shell_mode = "--shell" in argv_tail
+    argv_tail = [a for a in argv_tail if a != "--shell"]
+
+    # --- prompt detection (agent mode only) ---------------------------------
+    prompt = "" if shell_mode else detect_prompt(argv_tail)
 
     # --- preflight ----------------------------------------------------------
     preflight_checks(image)
@@ -454,20 +616,25 @@ def main() -> None:
     claude_json_tmp = make_claude_json_tmp(name)
     atexit.register(cleanup_claude_json_tmp, claude_json_tmp)
 
-    # --- build claude argv --------------------------------------------------
-    claude_argv = ["claude"]
-    if os.environ.get("CLAUDE_SANDBOX_SKIP_PERMISSIONS", "1") == "1":
-        claude_argv.append("--dangerously-skip-permissions")
-    if prompt:
-        claude_argv.append(prompt)
+    # --- build in-container command -----------------------------------------
+    if shell_mode:
+        container_argv = ["bash"]
+    else:
+        container_argv = ["claude"]
+        if os.environ.get("CLAUDE_SANDBOX_SKIP_PERMISSIONS", "1") == "1":
+            container_argv.append("--dangerously-skip-permissions")
+        if prompt:
+            container_argv.append(prompt)
 
     # --- reattach if container already running ------------------------------
     if container_is_running(name):
-        rc = docker_exec(name, claude_argv)
+        rc = docker_exec(name, container_argv)
         sys.exit(rc)
 
-    # Fresh container: extract macOS keychain credentials now.
-    if macos_creds:
+    # Fresh container: bootstrap credentials from macOS keychain if needed.
+    # Skip if the file already exists — the on-disk copy is more current than
+    # the keychain when other containers have refreshed tokens mid-session.
+    if macos_creds and not pathlib.Path(macos_creds).exists():
         extract_macos_credentials(pathlib.Path(macos_creds))
 
     # --- build docker run args and launch -----------------------------------
@@ -481,8 +648,8 @@ def main() -> None:
 
     docker_run(docker_args, image)
 
-    # Attach an interactive claude session.
-    rc = docker_exec(name, claude_argv)
+    # Attach an interactive session (agent or shell).
+    rc = docker_exec(name, container_argv)
     sys.exit(rc)
 
 

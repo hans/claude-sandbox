@@ -5,6 +5,7 @@
 .git
 .gitignore
 .superset/
+tools/
 README.md
 
 node_modules
