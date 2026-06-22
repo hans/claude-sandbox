@@ -322,6 +322,37 @@ def sync_credentials_back(macos_creds: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# GitHub CLI (gh) credential helpers
+# ---------------------------------------------------------------------------
+
+def resolve_gh_token() -> str:
+    """Return a GitHub token to inject into the container, or "".
+
+    Backend-agnostic on purpose. `gh auth token` resolves whatever the host's
+    gh would use -- the system keyring / macOS keychain ("secure storage"), the
+    plaintext ~/.config/gh/hosts.yml, or the GH_TOKEN/GITHUB_TOKEN env vars --
+    so we never have to know which backend the host configured. Mounting
+    ~/.config/gh alone is *not* enough: with secure storage the token lives in
+    the keychain and hosts.yml holds none, so the agent would silently see
+    "not logged in".
+
+    If the gh binary isn't on the host PATH we can't ask it, so fall back to the
+    env vars directly (covers hosts that authenticate purely via GH_TOKEN).
+    """
+    if shutil.which("gh") is not None:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            token = result.stdout.strip()
+            if token:
+                return token
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+
+
+# ---------------------------------------------------------------------------
 # Per-container temp copy of .claude.json
 # ---------------------------------------------------------------------------
 
@@ -453,6 +484,7 @@ def build_docker_args(
     claude_json_tmp: str,
     host_profile: "HostProfile | None" = None,
     project_config: "ProjectConfig | None" = None,
+    gh_token: str = "",
 ) -> list[str]:
     """Return the full argument list for `docker run` (excluding the image/cmd).
 
@@ -508,6 +540,24 @@ def build_docker_args(
     ssh_dir = pathlib.Path(home) / ".ssh"
     if os.environ.get("CLAUDE_SANDBOX_MOUNT_SSH", "0") == "1" and ssh_dir.is_dir():
         args += ["-v", f"{ssh_dir}:/home/claude/.ssh:ro"]
+
+    # GitHub CLI credentials: bring over the host's gh auth so the agent can use
+    # `gh` (open PRs, file issues, push over HTTPS). Two complementary pieces,
+    # both gated by CLAUDE_SANDBOX_MOUNT_GH (default on):
+    #   - mount ~/.config/gh ro for config.yml (git-protocol preference, aliases)
+    #     and hosts.yml (the token itself, when gh stores it in plaintext);
+    #   - inject the host-resolved token as GH_TOKEN, which also covers the case
+    #     where the host keeps the token in the keychain/keyring (hosts.yml then
+    #     holds no token). Env wins over the file in gh's own resolution order,
+    #     so this is harmless when hosts.yml already carries the token.
+    # The mount is ro (like ~/.ssh and ~/.gitconfig); fine for api/pr/push with
+    # an existing token -- ro only bites on an in-container `gh auth login`.
+    if os.environ.get("CLAUDE_SANDBOX_MOUNT_GH", "1") == "1":
+        gh_config = pathlib.Path(home) / ".config" / "gh"
+        if gh_config.is_dir():
+            args += ["-v", f"{gh_config}:/home/claude/.config/gh:ro"]
+        if gh_token:
+            args += ["-e", f"GH_TOKEN={gh_token}"]
 
     # Symlink mounts
     if os.environ.get("CLAUDE_SANDBOX_MOUNT_SYMLINKS", "1") == "1":
@@ -637,6 +687,14 @@ def main() -> None:
     if macos_creds and not pathlib.Path(macos_creds).exists():
         extract_macos_credentials(pathlib.Path(macos_creds))
 
+    # --- resolve gh credentials ---------------------------------------------
+    # Done here (host side) rather than inside build_docker_args so that pure,
+    # subprocess-free arg-building stays unit-testable. Gated by the same flag
+    # as the config mount so one switch fully opts out of gh credential sharing.
+    gh_token = ""
+    if os.environ.get("CLAUDE_SANDBOX_MOUNT_GH", "1") == "1":
+        gh_token = resolve_gh_token()
+
     # --- build docker run args and launch -----------------------------------
     docker_args = build_docker_args(
         name=name,
@@ -644,6 +702,7 @@ def main() -> None:
         image=image,
         network=network,
         claude_json_tmp=claude_json_tmp,
+        gh_token=gh_token,
     )
 
     docker_run(docker_args, image)

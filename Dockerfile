@@ -27,6 +27,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && sed -i 's|@include common-account|account sufficient pam_permit.so|' /etc/pam.d/sudo \
     && rm -rf /var/lib/apt/lists/*
 
+# --- GitHub CLI (gh) --------------------------------------------------------
+# Installed from GitHub's official apt repo. The host's gh credentials are
+# brought into the container at runtime by tools/launch.py (config mount +
+# resolved GH_TOKEN); see its "GitHub CLI credential helpers" section.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- uv (Python package/env manager) ----------------------------------------
 # The official installer defaults to ~/.local/bin; pin it to /usr/local/bin so
 # it's on PATH for every user, and tell it not to touch shell profiles.
