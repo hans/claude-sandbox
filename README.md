@@ -21,10 +21,9 @@ Deliberately *not* a Container Use (`cu`) setup: the host worktree is the source
 Assuming you've got Docker and you've logged into Claude on the host once (`claude /login`):
 
 ```bash
-# 1. Get the image. Pull the prebuilt one (no build needed):
+# 1. Get the image. Pull the prebuilt one (no build or retag needed):
 docker pull jrgauthier/claude-sandbox
-docker tag jrgauthier/claude-sandbox claude-sandbox:latest
-#     ...or build your own: `docker build -t claude-sandbox:latest .`
+#     ...or build your own: `docker build -t jrgauthier/claude-sandbox:latest .`
 
 # 2a. Bare terminal: from any worktree, just run the launcher.
 cd /path/to/worktree && /path/to/claude-sandbox/tools/launch.sh
@@ -95,19 +94,18 @@ A common gotcha: the agent spins up a dev server on port `3000` inside the conta
 
 ## Get the image
 
-A prebuilt image is published on Docker Hub, so you don't have to build it yourself. Pull it and tag it as the default name the launcher expects:
+A prebuilt image is published on Docker Hub, and it's the launcher's default — no build or retag needed. Just pull it:
 
 ```
 docker pull jrgauthier/claude-sandbox
-docker tag jrgauthier/claude-sandbox claude-sandbox:latest
 ```
 
-(Or skip the retag and point the launcher at it directly: `export CLAUDE_SANDBOX_IMAGE=jrgauthier/claude-sandbox`.)
+(To run a different image, point the launcher at it: `export CLAUDE_SANDBOX_IMAGE=your/image:tag`.)
 
 Prefer to build it yourself — to pin a base image, audit the layers, or hack on the `Dockerfile`:
 
 ```
-docker build -t claude-sandbox:latest .
+docker build -t jrgauthier/claude-sandbox:latest .
 ```
 
 Rebuild only when the `Dockerfile` changes. Per-project tooling (extra Python deps, system libs) goes in a downstream image — see below.
@@ -150,7 +148,7 @@ The global `claude-sandbox` image stays generic. Two ways to add per-project too
 **Persistent:** drop a `Dockerfile.project` in your project:
 
 ```dockerfile
-FROM claude-sandbox:latest
+FROM jrgauthier/claude-sandbox:latest
 RUN pip install --break-system-packages mne nibabel
 ```
 
@@ -195,10 +193,11 @@ Set in **Superset → Settings → Agents → your agent → Environment**, one 
 
 | Variable                            | Purpose                                                                                                                | Default                  |
 |-------------------------------------|------------------------------------------------------------------------------------------------------------------------|--------------------------|
-| `CLAUDE_SANDBOX_IMAGE`              | Docker image to run                                                                                                    | `claude-sandbox:latest`  |
+| `CLAUDE_SANDBOX_IMAGE`              | Docker image to run                                                                                                    | `jrgauthier/claude-sandbox:latest` |
 | `CLAUDE_SANDBOX_HOST`               | Host (launcher) profile: `generic` / `superset`. Auto-detected if unset (any `SUPERSET_*` var → `superset`)             | auto                     |
 | `CLAUDE_SANDBOX_NETWORK`            | `--network` value: `bridge` / `host` / `none` / custom network name                                                    | `bridge`                 |
 | `CLAUDE_SANDBOX_MOUNT_SSH`          | Set to `1` to mount `~/.ssh` read-only (for git push over SSH)                                                         | unset (off)              |
+| `CLAUDE_SANDBOX_MOUNT_GH`           | Set to `0` to skip bringing over the host's GitHub CLI (`gh`) auth (config mount + resolved `GH_TOKEN`)                | `1` (on)                 |
 | `CLAUDE_SANDBOX_MOUNT_SYMLINKS`     | Set to `0` to skip the symlink-escape scan                                                                             | `1` (on)                 |
 | `CLAUDE_SANDBOX_SYMLINK_MOUNTS_RW`  | Set to `1` to mount **all** symlink targets read-write                                                                 | `0` (read-only)          |
 | `CLAUDE_SANDBOX_SYMLINK_RW_PATHS`   | Colon-delimited path prefixes to mount rw; everything else stays ro. E.g. `results_scratch:/data/shared`               | unset                    |
@@ -231,6 +230,8 @@ If your project uses a non-standard layout (custom `GIT_DIR`, etc.), you may nee
 **`credentials not found` / Claude asks you to log in inside the container.** The container mounts both `~/.claude` (directory) and the sibling `~/.claude.json` (file). If either is missing, run `claude /login` on the host first.
 
 On macOS, the OAuth tokens themselves live in the system keychain, not in any file. `launch.sh` extracts the `Claude Code-credentials` keychain entry on every launch and stages it at `~/.claude/.credentials.json`, which Linux Claude reads natively. **Side effect:** when Claude inside the container refreshes its access token, the host keychain's refresh token may be invalidated, and you'll need to re-`claude /login` on the host next time. Refresh tokens last weeks, so it's infrequent.
+
+**`gh` inside the container says "not logged in".** The image ships the GitHub CLI, and `launch.py` brings the host's auth over on a fresh container (set `CLAUDE_SANDBOX_MOUNT_GH=0` to opt out). It does two things: mounts `~/.config/gh` read-only (so `config.yml` and a plaintext `hosts.yml` come across) and resolves a token with `gh auth token` on the host, injecting it as `GH_TOKEN`. That `gh auth token` step is what makes the macOS case work — there, the token lives in the keychain ("secure storage") and `hosts.yml` holds none, so the mount alone would bring nothing usable. If the agent still isn't authed: confirm `gh auth status` works on the host, and note the token is resolved at launch — `gh auth login` on the host mid-session won't reach an already-running container (exit and relaunch). The mount is read-only, so an in-container `gh auth login` can't persist; log in on the host instead.
 
 **`Claude configuration file not found at: /home/claude/.claude.json`** after the host config was edited. Bind-mounted single files are pinned to the inode at mount time. Some atomic-write tools (and Claude Code's own backup flow) replace the file rather than truncating it, which breaks the mount. Exit the container and relaunch.
 
