@@ -47,41 +47,47 @@ docker run --rm claude-sandbox:latest claude --version
 
 Should print the Claude Code version.
 
-## 3. Put the launch scripts where Superset can find them
+## 3. Install the launcher once, globally
 
-`launch.sh` is intentionally a relative-path script (`tools/launch.sh`)
-so each repo carries its own copy and you can customize per project. Two
-ways to deploy it.
-
-**Per repo (recommended).** Copy the `tools/` directory into each
-repo you want to sandbox:
+**Recommended: `tools/install.sh`.** Run it once and you never touch an
+individual project again — no copying `tools/` in, no symlinking `.superset/`,
+no per-repo `.claude-sandbox.toml`:
 
 ```
-cp -r tools /path/to/your/repo/
-cd /path/to/your/repo/
-git add tools/
-git commit -m "Add Superset sandbox launcher"
+./tools/install.sh
 ```
 
-The launcher reads `CLAUDE_SANDBOX_IMAGE` so projects can override the
-image; the default `claude-sandbox:latest` works fine for most.
-
-> The core is toolchain-neutral: it emits no `UV_*` env or cache mounts
-> unless the worktree has a `.claude-sandbox.toml`. If your project uses
-> Python/uv, copy this repo's `.claude-sandbox.toml` too (or write your own) —
-> otherwise you lose the container-private venv. See README → *Per-project
-> configuration*.
-
-**Global (one script for everything).** If you'd rather not copy files into
-each repo, drop `launch.sh` somewhere on your PATH and point Superset at
-the absolute path:
+It symlinks two stable commands onto your PATH (defaults to `~/.local/bin`)
+and seeds a shared config:
 
 ```
-install -m 755 tools/launch.sh ~/bin/claude-sandbox-launch
+~/.local/bin/claude-sandbox         -> tools/launch.py   (the launcher)
+~/.local/bin/claude-sandbox-setup   -> tools/setup.sh    (the per-worktree hook)
+~/.config/claude-sandbox/config.toml                     (shared defaults)
 ```
 
-Then use `~/bin/claude-sandbox-launch` instead of `tools/launch.sh` in
-the Superset config below.
+Because these are **symlinks into this checkout**, a `git pull` here updates
+every project at once. Override the locations with `BINDIR=` / `CONFDIR=` if
+you like. The launcher still reads `CLAUDE_SANDBOX_IMAGE`, so projects can
+override the image; the default `claude-sandbox:latest` works for most.
+
+Now the launcher is toolchain-neutral **only until it finds a config**, and it
+looks in two places, in order:
+
+1. `./.claude-sandbox.toml` at the worktree root — an explicit per-project
+   config that always wins.
+2. `~/.config/claude-sandbox/config.toml` — the shared default `install.sh`
+   seeded above.
+
+So your Python/uv settings (container-private venv, shared cache) live in
+**one** place and apply everywhere. A project that needs something different
+just drops its own `./.claude-sandbox.toml`. Point at a different global file
+with `CLAUDE_SANDBOX_CONFIG=/path/to.toml`. See README → *Per-project
+configuration*.
+
+Terminal users are done: `cd` into any worktree and run `claude-sandbox`
+(`claude-sandbox --shell` for a bash shell in the same container). Superset
+users continue to step 4 to point the agent at the absolute paths above.
 
 ## 4. Configure a Superset agent
 
@@ -97,20 +103,25 @@ behavior and just wrap the launcher.
 Click **New agent** (or whatever the current UI calls it). Fill the fields
 like this:
 
-| Field                  | Value                                    |
-|------------------------|------------------------------------------|
-| Label                  | `Claude (sandbox)` (or anything memorable) |
-| Enabled                | ON                                       |
-| Command (No Prompt)    | `tools/launch.sh`                        |
-| Command (With Prompt)  | `tools/launch.sh`                        |
-| Prompt Command Suffix  | *(leave empty)*                          |
-| Task Prompt Template   | *(leave default)*                        |
-| Model Override         | *(leave empty unless you want one)*      |
+| Field                  | Value                                       |
+|------------------------|---------------------------------------------|
+| Label                  | `Claude (sandbox)` (or anything memorable)  |
+| Enabled                | ON                                          |
+| Command (No Prompt)    | `~/.local/bin/claude-sandbox`               |
+| Command (With Prompt)  | `~/.local/bin/claude-sandbox`               |
+| Setup hook             | `~/.local/bin/claude-sandbox-setup`         |
+| Prompt Command Suffix  | *(leave empty)*                             |
+| Task Prompt Template   | *(leave default)*                           |
+| Model Override         | *(leave empty unless you want one)*         |
 
-If you went with the global-script approach in step 3, replace
-`tools/launch.sh` with `/Users/you/bin/claude-sandbox-launch`.
+Use the **absolute** paths `install.sh` printed (expand `~` if Superset
+doesn't). That's the whole point: absolute paths resolve the same in every
+workspace, so no `tools/` or `.superset/` needs to live in the repo. If your
+Superset build can't set a Setup hook, `claude-sandbox-setup` is optional —
+it only copies `../.env` into new worktrees.
 
-Save the agent.
+Save the agent, then **delete the `.superset/` and `tools/` symlinks** from
+your project repos — they're no longer referenced.
 
 ## 5. Launch it in a workspace
 

@@ -156,17 +156,49 @@ class ProjectConfig:
     extra_prune: set = field(default_factory=set)
 
 
-def load_project_config(pwd: str) -> ProjectConfig:
-    """Load .claude-sandbox.toml from *pwd*; return an empty config if absent.
+def global_config_path() -> pathlib.Path:
+    """Where the shared, user-global config lives.
 
-    If the file exists but can't be parsed (or no TOML parser is available on
-    this Python), fail loud rather than silently ignoring it -- a present
-    config that says "don't use uv" must never be silently overridden by a
-    default that does.
+    Order of precedence: $CLAUDE_SANDBOX_CONFIG (explicit file), else
+    $XDG_CONFIG_HOME/claude-sandbox/config.toml, else
+    ~/.config/claude-sandbox/config.toml. This is the "install once, use
+    everywhere" location -- so a Python/uv project's venv+cache config doesn't
+    have to be copied or symlinked into every worktree.
+    """
+    explicit = os.environ.get("CLAUDE_SANDBOX_CONFIG")
+    if explicit:
+        return pathlib.Path(os.path.expanduser(explicit))
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        str(pathlib.Path.home()), ".config"
+    )
+    return pathlib.Path(xdg) / "claude-sandbox" / "config.toml"
+
+
+def load_project_config(pwd: str) -> ProjectConfig:
+    """Load config for *pwd*; return an empty config if none is found.
+
+    Resolution order:
+      1. $PWD/.claude-sandbox.toml -- an explicit per-project config always
+         wins. A worktree that says "don't use uv" must never be silently
+         overridden by the global default.
+      2. The user-global config (see global_config_path()) -- the shared
+         default so common settings live in one place, not per worktree.
+
+    Whichever file is chosen, a parse error (or a missing TOML parser) is fatal
+    rather than silently ignored.
     """
     path = pathlib.Path(pwd) / ".claude-sandbox.toml"
     if not path.is_file():
-        return ProjectConfig()
+        fallback = global_config_path()
+        if fallback.is_file():
+            print(
+                f"claude-sandbox: using global config {fallback} "
+                "(no ./.claude-sandbox.toml).",
+                file=sys.stderr,
+            )
+            path = fallback
+        else:
+            return ProjectConfig()
 
     try:
         import tomllib  # Python 3.11+

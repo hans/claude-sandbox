@@ -858,6 +858,77 @@ class TestProjectConfig:
 
 
 # ===========================================================================
+# 13. Global config fallback — install once, use everywhere
+# ===========================================================================
+
+class TestGlobalConfigFallback:
+    """A worktree with no .claude-sandbox.toml falls back to the user-global
+    config, so common uv/venv settings live in one place, not per worktree."""
+
+    def _write_global(self, home, body):
+        cfg = home / ".config" / "claude-sandbox" / "config.toml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(body)
+        return cfg
+
+    def test_global_config_used_when_no_local(self, tmp_home, tmp_worktree, monkeypatch):
+        """With no ./.claude-sandbox.toml, the global config is loaded."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        self._write_global(tmp_home, '[env]\nUV_CACHE_DIR = "/home/claude/.cache/uv"\n')
+        cfg = launch.load_project_config(str(tmp_worktree))
+        assert cfg.env["UV_CACHE_DIR"] == "/home/claude/.cache/uv"
+
+    def test_local_config_wins_over_global(self, tmp_home, tmp_worktree, monkeypatch):
+        """An explicit per-project config always overrides the global default,
+        even when the global says something different."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        self._write_global(tmp_home, '[env]\nUV_CACHE_DIR = "/global/cache"\n')
+        (tmp_worktree / ".claude-sandbox.toml").write_text(
+            '[env]\nUV_CACHE_DIR = "/local/cache"\n'
+        )
+        cfg = launch.load_project_config(str(tmp_worktree))
+        assert cfg.env["UV_CACHE_DIR"] == "/local/cache"
+
+    def test_no_config_anywhere_is_empty(self, tmp_home, tmp_worktree, monkeypatch):
+        """No local and no global config -> neutral empty config (no error)."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        cfg = launch.load_project_config(str(tmp_worktree))
+        assert cfg.env == {} and cfg.mounts == [] and cfg.extra_prune == set()
+
+    def test_explicit_env_var_points_at_config(self, tmp_home, tmp_worktree, tmp_path, monkeypatch):
+        """CLAUDE_SANDBOX_CONFIG overrides the default global location."""
+        custom = tmp_path / "somewhere" / "my.toml"
+        custom.parent.mkdir(parents=True)
+        custom.write_text('[env]\nFOO = "bar"\n')
+        monkeypatch.setenv("CLAUDE_SANDBOX_CONFIG", str(custom))
+        cfg = launch.load_project_config(str(tmp_worktree))
+        assert cfg.env["FOO"] == "bar"
+
+    def test_xdg_config_home_respected(self, tmp_home, tmp_worktree, tmp_path, monkeypatch):
+        """$XDG_CONFIG_HOME relocates the default global config dir."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_CONFIG", raising=False)
+        xdg = tmp_path / "xdg"
+        cfg = xdg / "claude-sandbox" / "config.toml"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text('[env]\nBAZ = "qux"\n')
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+        loaded = launch.load_project_config(str(tmp_worktree))
+        assert loaded.env["BAZ"] == "qux"
+
+    def test_broken_global_config_fails_loud(self, tmp_home, tmp_worktree, monkeypatch):
+        """A broken global config exits non-zero rather than silently defaulting."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_CONFIG", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        self._write_global(tmp_home, "not = = valid ][")
+        with pytest.raises(SystemExit) as exc:
+            launch.load_project_config(str(tmp_worktree))
+        assert exc.value.code != 0
+
+
+# ===========================================================================
 # Helper functions
 # ===========================================================================
 

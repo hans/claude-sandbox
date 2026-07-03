@@ -123,21 +123,34 @@ Rebuild only when the `Dockerfile` changes. Per-project tooling (extra Python de
 
 Set `CLAUDE_SANDBOX_HOST=generic` to force the generic profile even under Superset. Adding a new launcher is one entry in the `_HOST_PROFILES` registry in `tools/launch.py`.
 
-**Bare terminal:** `cd` into the worktree and run `tools/launch.sh "your prompt"`.
+**Install once, globally.** `./tools/install.sh` symlinks the launcher and the
+per-worktree setup hook onto your PATH and seeds a shared config, so you never
+copy `tools/`, symlink `.superset/`, or duplicate a `.claude-sandbox.toml` into
+individual repos:
+
+```
+~/.local/bin/claude-sandbox         -> tools/launch.py
+~/.local/bin/claude-sandbox-setup   -> tools/setup.sh
+~/.config/claude-sandbox/config.toml   (shared defaults; per-project ./.claude-sandbox.toml still wins)
+```
+
+Symlinks into this checkout mean `git pull` updates every project at once.
+`BINDIR=` / `CONFDIR=` override the locations.
+
+**Bare terminal:** `cd` into any worktree and run `claude-sandbox "your prompt"` (`claude-sandbox --shell` for a bash shell).
 
 **Superset** — **Settings → Agents → New agent** (or duplicate the built-in `claude` preset):
 
 | Field                  | Value                                       |
 |------------------------|---------------------------------------------|
-| Command (No Prompt)    | `tools/launch.sh`                           |
-| Command (With Prompt)  | `tools/launch.sh`                           |
+| Command (No Prompt)    | `~/.local/bin/claude-sandbox`               |
+| Command (With Prompt)  | `~/.local/bin/claude-sandbox`               |
+| Setup hook             | `~/.local/bin/claude-sandbox-setup`         |
 | Prompt Command Suffix  | *(empty)*                                   |
 | Task Prompt Template   | *(default is fine)*                         |
 | Environment            | `CLAUDE_SANDBOX_NETWORK=bridge` *(example)* |
 
-Superset appends the prompt as argv to "Command (With Prompt)" after the suffix, which is what `launch.sh` expects. The Environment field is where you set `CLAUDE_SANDBOX_*` variables; one per line. You can also `export` them in the shell that starts Superset for a host-wide default. The `superset` host profile is auto-selected because Superset injects `SUPERSET_*` vars.
-
-> Deprecated path: scripts used to live in `.superset/`. Thin compat shims remain there so existing agent configs keep working — update your command to `tools/launch.sh` and delete `.superset/` when convenient.
+Use the **absolute** paths (expand `~` if Superset won't). Because they resolve identically in every workspace, nothing has to live in the repo — delete any `.superset/` and `tools/` symlinks once you've switched. Superset appends the prompt as argv to "Command (With Prompt)" after the suffix, which is what the launcher expects. The Environment field is where you set `CLAUDE_SANDBOX_*` variables; one per line. You can also `export` them in the shell that starts Superset for a host-wide default. The `superset` host profile is auto-selected because Superset injects `SUPERSET_*` vars.
 
 > Superset itself doesn't define a `SUPERSET_PROMPT` env var; the env-var and stdin paths in `launch.sh` are fallbacks for invoking the script manually from a terminal, not Superset-driven transports.
 
@@ -181,9 +194,18 @@ container = "/home/claude/.cache/uv"
 mode = "rw"
 ```
 
-This repo ships the Python/uv config above (a container-private venv plus a shared uv cache). A Rust or Go checkout drops in its own file, or none — without a `.claude-sandbox.toml`, no `UV_*` vars or cache mounts are emitted. (`.git`, `.venv`, `venv`, `.venv-container`, and `node_modules` are always pruned from the symlink scan regardless.)
+This repo ships the Python/uv config above (a container-private venv plus a shared uv cache). With no config found anywhere, no `UV_*` vars or cache mounts are emitted. (`.git`, `.venv`, `venv`, `.venv-container`, and `node_modules` are always pruned from the symlink scan regardless.)
 
-If the file is present but unparseable, `launch.sh` exits with an error rather than silently falling back — a config that says "don't use uv" must never be quietly ignored.
+Note the interaction with the global default below: once `install.sh` has seeded a Python/uv `~/.config/claude-sandbox/config.toml`, a worktree that omits `./.claude-sandbox.toml` **inherits** it. A non-Python checkout that wants the neutral core back opts out explicitly by dropping its own `./.claude-sandbox.toml` (its own settings, or an empty file for none) — the per-project file always wins.
+
+**Where the config comes from** — the launcher resolves in two steps, so common settings don't have to be duplicated per worktree:
+
+1. **`./.claude-sandbox.toml`** at the worktree root — an explicit per-project config. Always wins.
+2. **`~/.config/claude-sandbox/config.toml`** — the user-global default (seeded by `tools/install.sh`). Used only when there's no per-project file. Relocate it with `$XDG_CONFIG_HOME`, or point at a specific file with `CLAUDE_SANDBOX_CONFIG=/path/to.toml`.
+
+So your Python/uv defaults live in one place and apply to every worktree; a project that genuinely differs just drops its own `./.claude-sandbox.toml`. There's no walk-up or merging — exactly one file is used, and the per-project one is never overridden by the global default.
+
+If the chosen file is present but unparseable, `launch.sh` exits with an error rather than silently falling back — a config that says "don't use uv" must never be quietly ignored.
 
 ## Environment variables
 
