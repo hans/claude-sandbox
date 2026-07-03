@@ -929,6 +929,104 @@ class TestGlobalConfigFallback:
 
 
 # ===========================================================================
+# GitHub CLI (gh) credential sharing
+# ===========================================================================
+
+class TestGhCredentials:
+    """Bring the host's gh auth (config mount + resolved GH_TOKEN) into the box."""
+
+    def test_config_dir_mounted_ro_when_present(self, tmp_home, tmp_worktree, monkeypatch):
+        """~/.config/gh is mounted read-only at /home/claude/.config/gh."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_MOUNT_GH", raising=False)
+        gh_dir = tmp_home / ".config" / "gh"
+        gh_dir.mkdir(parents=True)
+        (gh_dir / "hosts.yml").write_text("github.com:\n  oauth_token: tkn\n")
+
+        args = launch.build_docker_args(
+            name="c", pwd=str(tmp_worktree), image="img",
+            network="bridge", claude_json_tmp="/tmp/fake",
+        )
+        mounts = _extract_volume_mounts(args)
+        assert f"{gh_dir}:/home/claude/.config/gh:ro" in mounts
+
+    def test_config_dir_not_mounted_when_absent(self, tmp_home, tmp_worktree, monkeypatch):
+        """No gh mount when the host has no ~/.config/gh."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_MOUNT_GH", raising=False)
+        args = launch.build_docker_args(
+            name="c", pwd=str(tmp_worktree), image="img",
+            network="bridge", claude_json_tmp="/tmp/fake",
+        )
+        mounts = _extract_volume_mounts(args)
+        assert not any("/home/claude/.config/gh" in m for m in mounts)
+
+    def test_disabled_skips_mount_and_token(self, tmp_home, tmp_worktree, monkeypatch):
+        """CLAUDE_SANDBOX_MOUNT_GH=0 emits neither the mount nor GH_TOKEN."""
+        monkeypatch.setenv("CLAUDE_SANDBOX_MOUNT_GH", "0")
+        (tmp_home / ".config" / "gh").mkdir(parents=True)
+
+        args = launch.build_docker_args(
+            name="c", pwd=str(tmp_worktree), image="img",
+            network="bridge", claude_json_tmp="/tmp/fake", gh_token="tkn",
+        )
+        mounts = _extract_volume_mounts(args)
+        env_args = _extract_env_args(args)
+        assert not any("/home/claude/.config/gh" in m for m in mounts)
+        assert not any(e.startswith("GH_TOKEN=") for e in env_args)
+
+    def test_token_injected_as_env(self, tmp_home, tmp_worktree, monkeypatch):
+        """A resolved gh_token is passed as -e GH_TOKEN=<value>."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_MOUNT_GH", raising=False)
+        args = launch.build_docker_args(
+            name="c", pwd=str(tmp_worktree), image="img",
+            network="bridge", claude_json_tmp="/tmp/fake", gh_token="gho_secret",
+        )
+        env_args = _extract_env_args(args)
+        assert "GH_TOKEN=gho_secret" in env_args
+
+    def test_empty_token_not_injected(self, tmp_home, tmp_worktree, monkeypatch):
+        """No GH_TOKEN env when the token resolves empty."""
+        monkeypatch.delenv("CLAUDE_SANDBOX_MOUNT_GH", raising=False)
+        args = launch.build_docker_args(
+            name="c", pwd=str(tmp_worktree), image="img",
+            network="bridge", claude_json_tmp="/tmp/fake", gh_token="",
+        )
+        env_args = _extract_env_args(args)
+        assert not any(e.startswith("GH_TOKEN=") for e in env_args)
+
+    def test_resolve_prefers_gh_auth_token(self, monkeypatch):
+        """resolve_gh_token runs `gh auth token` when gh is on PATH."""
+        monkeypatch.setattr(launch.shutil, "which", lambda _: "/usr/bin/gh")
+
+        def fake_run(argv, **kwargs):
+            assert argv == ["gh", "auth", "token"]
+            r = mock.MagicMock()
+            r.returncode = 0
+            r.stdout = "gho_fromgh\n"
+            return r
+
+        monkeypatch.setattr(launch.subprocess, "run", fake_run)
+        assert launch.resolve_gh_token() == "gho_fromgh"
+
+    def test_resolve_falls_back_to_env_when_no_gh(self, monkeypatch):
+        """Without the gh binary, fall back to GH_TOKEN / GITHUB_TOKEN env."""
+        monkeypatch.setattr(launch.shutil, "which", lambda _: None)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "gho_fromenv")
+        assert launch.resolve_gh_token() == "gho_fromenv"
+
+    def test_resolve_empty_when_gh_unauthenticated(self, monkeypatch):
+        """gh present but logged out (nonzero exit) and no env → empty string."""
+        monkeypatch.setattr(launch.shutil, "which", lambda _: "/usr/bin/gh")
+        r = mock.MagicMock()
+        r.returncode = 1
+        r.stdout = ""
+        monkeypatch.setattr(launch.subprocess, "run", lambda *a, **k: r)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        assert launch.resolve_gh_token() == ""
+
+
+# ===========================================================================
 # Helper functions
 # ===========================================================================
 

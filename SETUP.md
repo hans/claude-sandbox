@@ -18,31 +18,30 @@ If any of these fails, fix it before continuing.
 
 ## 2. Get the image once
 
-A prebuilt image is published on Docker Hub, so you don't have to build it
-yourself. Pull it and tag it as the default name the launcher expects:
+A prebuilt image is published on Docker Hub, and it's the launcher's
+default — so you don't have to build *or* retag anything. Just pull it:
 
 ```
 docker pull jrgauthier/claude-sandbox
-docker tag jrgauthier/claude-sandbox claude-sandbox:latest
 ```
-
-(Or skip the retag and set `CLAUDE_SANDBOX_IMAGE=jrgauthier/claude-sandbox`
-in the agent's Environment field in step 4.)
 
 Prefer to build it yourself — to pin a base image or hack on the
 `Dockerfile`? From this directory:
 
 ```
-docker build -t claude-sandbox:latest .
+docker build -t jrgauthier/claude-sandbox:latest .
 ```
 
 Takes ~2 minutes on first build, seconds on subsequent rebuilds (layer
 cache). You only need to do this again when the `Dockerfile` changes.
 
+To use a different image entirely, set `CLAUDE_SANDBOX_IMAGE` (e.g. in the
+agent's Environment field in step 4).
+
 Verify (either way):
 
 ```
-docker run --rm claude-sandbox:latest claude --version
+docker run --rm jrgauthier/claude-sandbox:latest claude --version
 ```
 
 Should print the Claude Code version.
@@ -69,7 +68,7 @@ and seeds a shared config:
 Because these are **symlinks into this checkout**, a `git pull` here updates
 every project at once. Override the locations with `BINDIR=` / `CONFDIR=` if
 you like. The launcher still reads `CLAUDE_SANDBOX_IMAGE`, so projects can
-override the image; the default `claude-sandbox:latest` works for most.
+override the image; the default `jrgauthier/claude-sandbox:latest` works for most.
 
 Now the launcher is toolchain-neutral **only until it finds a config**, and it
 looks in two places, in order:
@@ -158,12 +157,12 @@ Worktree state is on disk, so nothing is lost.
 
 ## 7. (Optional) Per-project extension
 
-The default `claude-sandbox:latest` is intentionally generic. To bake
-project-specific tools into a derived image:
+The default `jrgauthier/claude-sandbox:latest` is intentionally generic. To
+bake project-specific tools into a derived image:
 
 ```
 # In your project repo, e.g. ./Dockerfile.project
-FROM claude-sandbox:latest
+FROM jrgauthier/claude-sandbox:latest
 RUN pip install --break-system-packages mne nibabel
 ```
 
@@ -187,7 +186,7 @@ Or export it before starting Superset.
 | Symptom                                                          | Cause                                                                 | Fix                                                                                       |
 |------------------------------------------------------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------|
 | `docker: command not found`                                      | Docker not on PATH                                                    | Open Docker Desktop / install Docker engine.                                              |
-| `claude-sandbox: image 'claude-sandbox:latest' not found.`       | Image not pulled/built yet                                            | `docker pull jrgauthier/claude-sandbox && docker tag jrgauthier/claude-sandbox claude-sandbox:latest` (or `docker build -t claude-sandbox:latest .`). |
+| `claude-sandbox: image 'jrgauthier/claude-sandbox:latest' not found.` | Image not pulled/built yet                                       | `docker pull jrgauthier/claude-sandbox` (or `docker build -t jrgauthier/claude-sandbox:latest .`). |
 | `Claude configuration file not found at: /home/claude/.claude.json` | Host `~/.claude.json` missing or container was started before fix | Run `claude /login` on host; `docker rm -f` any stale container; relaunch.                |
 | `couldn't read 'Claude Code-credentials' from keychain`          | macOS keychain entry missing                                          | Run `claude /login` on the host.                                                          |
 | `fatal: not a git repository` inside the container               | Worktree's `.git` pointer can't resolve                               | `launch.sh` should be auto-mounting the parent `.git` -- check the script is current.     |
